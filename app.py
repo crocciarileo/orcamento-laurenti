@@ -18,7 +18,7 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. INICIALIZAÇÃO DO BANCO DE DADOS (SQLite)
+# 1. INICIALIZAÇÃO E MIGRAÇÃO AUTOMÁTICA DO BANCO DE DADOS (SQLite)
 # -----------------------------------------------------------------------------
 def get_connection():
     return sqlite3.connect('orcamentos.db', check_same_thread=False)
@@ -87,6 +87,16 @@ def init_db():
         )
     """)
 
+    # MIGRAÇÕES AUTOMÁTICAS (Corrige os bancos criados em versões anteriores)
+    c.execute("PRAGMA table_info(orcamentos)")
+    colunas_existentes = [coluna[1] for coluna in c.fetchall()]
+    
+    if "proposta_num" not in colunas_existentes:
+        c.execute("ALTER TABLE orcamentos ADD COLUMN proposta_num TEXT DEFAULT '2358'")
+        
+    if "consultor" not in colunas_existentes:
+        c.execute("ALTER TABLE orcamentos ADD COLUMN consultor TEXT")
+
     # Tabela de Ambientes
     c.execute("""
         CREATE TABLE IF NOT EXISTS ambientes (
@@ -129,7 +139,7 @@ def get_consultores():
 # Canvas com Contagem de Páginas (Página X de Y)
 class NumberedCanvas(canvas.Canvas):
     def __init__(self, *args, **kwargs):
-        canvas.Canvas.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self._saved_page_states = []
 
     def showPage(self):
@@ -141,8 +151,8 @@ class NumberedCanvas(canvas.Canvas):
         for state in self._saved_page_states:
             self.__dict__.update(state)
             self.draw_page_number(num_pages)
-            canvas.Canvas.showPage(self)
-        canvas.Canvas.save(self)
+            super().showPage()
+        super().save()
 
     def draw_page_number(self, page_count):
         config = get_config()
@@ -200,7 +210,7 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     if config['logo_path'] and os.path.exists(config['logo_path']):
         try:
             col_logo = RLImage(config['logo_path'], width=3.5*cm, height=1.5*cm)
-        except:
+        except Exception:
             pass
 
     cli_text = f"""
@@ -345,7 +355,6 @@ if menu == "➕ Novo / Editar Orçamento":
     df_cons = get_consultores()
     consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["Sem Consultor"]
 
-    # Botão para Novo Orçamento Zerado
     if st.button("✨ Criar Novo Orçamento Limpo"):
         st.session_state.ambientes = []
         st.session_state.edit_index = None
@@ -366,7 +375,6 @@ if menu == "➕ Novo / Editar Orçamento":
             
         with col3:
             proposta_num = st.text_input("Proposta Nº", value=st.session_state.get('cli_prop', '2358'))
-            # Requisito: Validade padrão 30 dias
             dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True)
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
@@ -400,12 +408,9 @@ if menu == "➕ Novo / Editar Orçamento":
                 })
                 st.rerun()
 
-    # Requisito: Garantir que opcionais fiquem no final de cada ambiente
     if st.session_state.ambientes:
         for idx_amb, amb in enumerate(st.session_state.ambientes):
             ordem_amb = idx_amb + 1
-            
-            # Ordenar subitens colocando os opcionais por último
             amb['itens'] = sorted(amb['itens'], key=lambda x: x['eh_opcional'])
 
             with st.expander(f"🛋️ **Item {ordem_amb}: {amb['nome'].upper()}** — Total: R$ {amb['total_ambiente']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), expanded=True):
@@ -423,7 +428,6 @@ if menu == "➕ Novo / Editar Orçamento":
 
                 st.markdown(f"##### Subitens do Ambiente {ordem_amb}")
                 
-                # Requisito 2: Adição de subitem com campos limpos
                 with st.form(f"form_add_subitem_{idx_amb}", clear_on_submit=True):
                     col_i1, col_i2, col_i3, col_i4 = st.columns([3, 1.5, 1, 1])
                     with col_i1:
@@ -446,7 +450,6 @@ if menu == "➕ Novo / Editar Orçamento":
                             })
                             st.rerun()
 
-                # Lista e Edição de Subitens Existentes
                 if amb['itens']:
                     for idx_item, item in enumerate(amb['itens']):
                         tag_opc = " (OPCIONAL)" if item['eh_opcional'] else ""
@@ -485,7 +488,6 @@ if menu == "➕ Novo / Editar Orçamento":
                 c = conn.cursor()
                 
                 if st.session_state.edit_index:
-                    # Atualização
                     orc_id = st.session_state.edit_index
                     c.execute("DELETE FROM ambientes WHERE orcamento_id = ?", (orc_id,))
                     c.execute("""
@@ -493,7 +495,6 @@ if menu == "➕ Novo / Editar Orçamento":
                         WHERE id=?
                     """, (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
                 else:
-                    # Inserção
                     c.execute("""
                         INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -542,7 +543,7 @@ if menu == "➕ Novo / Editar Orçamento":
                 use_container_width=True
             )
 
-# --- ABA 2: ORÇAMENTOS SALVOS (COM BOTÕES DE AÇÃO DIRETA) ---
+# --- ABA 2: ORÇAMENTOS SALVOS ---
 elif menu == "📋 Orçamentos Salvos":
     st.subheader("📋 Orçamentos Salvos no Banco de Dados")
     conn = get_connection()
@@ -551,19 +552,16 @@ elif menu == "📋 Orçamentos Salvos":
     df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, total_com_opcionais FROM orcamentos ORDER BY id DESC", conn)
     
     if not df_orc.empty:
-        # Requisito 5: Tabela interativa com botões por linha
         for idx, row in df_orc.iterrows():
             with st.container():
-                col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns([1, 3, 2, 1.5, 1.5])
+                col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns([1.5, 3, 2, 1.2, 1.2])
                 col_a1.write(f"**#{row['id']}** (Prop: {row['proposta_num']})")
                 col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # Botão Editar (Redireciona direto)
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     st.session_state.edit_index = row['id']
                     
-                    # Carregar dados para o formulário
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = c.fetchone()
                     
@@ -594,7 +592,6 @@ elif menu == "📋 Orçamentos Salvos":
                     st.success(f"Orçamento #{row['id']} carregado! Mudando para o formulário...")
                     st.rerun()
 
-                # Botão Excluir
                 if col_a5.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
                     c.execute("DELETE FROM orcamentos WHERE id = ?", (row['id'],))
                     conn.commit()
@@ -613,7 +610,6 @@ elif menu == "⚙️ Configurações":
     st.markdown("#### 🏢 Logo e Dados da Fábrica")
     config = get_config()
     
-    # Requisito 6: Upload da Logo da Empresa
     uploaded_logo = st.file_uploader("Enviar Logo da Empresa (PNG / JPG)", type=["png", "jpg", "jpeg"])
     if uploaded_logo:
         logo_path = os.path.join("logo_empresa.png")
@@ -647,7 +643,6 @@ elif menu == "⚙️ Configurações":
     st.markdown("---")
     st.markdown("#### 👤 Gestão de Consultores")
     
-    # Requisito 5: Cadastrar/Excluir Consultores sem digitar ID
     with st.form("form_add_consultor", clear_on_submit=True):
         novo_c = st.text_input("Nome do Novo Consultor")
         if st.form_submit_button("➕ Cadastrar Consultor"):
