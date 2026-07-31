@@ -231,18 +231,18 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
             pass
 
     cli_text = f"""
-    <b>Cliente:</b> {cliente_info['cliente']}<br/>
-    <b>Contato:</b> {cliente_info['contato']}<br/>
+    <b>Cliente:</b> {cliente_info.get('cliente', '')}<br/>
+    <b>Contato:</b> {cliente_info.get('contato', '')}<br/>
     <b>Consultor:</b> {cliente_info.get('consultor', 'N/A')}<br/>
-    <b>Tipo de Contato:</b> {cliente_info['tipo_contato']}<br/>
-    <b>Telefone:</b> {cliente_info['telefone']} &nbsp;&nbsp;&nbsp; <b>E-mail:</b> {cliente_info['email']}
+    <b>Tipo de Contato:</b> {cliente_info.get('tipo_contato', 'Residencial')}<br/>
+    <b>Telefone:</b> {cliente_info.get('telefone', '')} &nbsp;&nbsp;&nbsp; <b>E-mail:</b> {cliente_info.get('email', '')}
     """
     
     prop_num = cliente_info.get('proposta_num', '2358')
     prop_text = f"""
     <b>Proposta:</b> {prop_num}<br/><br/>
-    <b>Data:</b> {cliente_info['data']}<br/><br/>
-    <b>Validade:</b> {cliente_info['validade']}
+    <b>Data:</b> {cliente_info.get('data', '')}<br/><br/>
+    <b>Validade:</b> {cliente_info.get('validade', '')}
     """
     
     t_head = Table([
@@ -317,9 +317,9 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     cond_text = f"""
-    <b>Prazo de Entrega:</b> {cliente_info['prazo_entrega']}<br/>
-    <b>Condição de Pagamento:</b> {cliente_info['condicoes_pagamento']}<br/>
-    <b>Observações:</b> {cliente_info['observacoes']}
+    <b>Prazo de Entrega:</b> {cliente_info.get('prazo_entrega', '')}<br/>
+    <b>Condição de Pagamento:</b> {cliente_info.get('condicoes_pagamento', '')}<br/>
+    <b>Observações:</b> {cliente_info.get('observacoes', '')}
     """
     
     totais_box_text = f"""
@@ -358,8 +358,9 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-if 'active_tab' not in st.session_state:
-    st.session_state.active_tab = "➕ Novo / Editar Orçamento"
+# Sincronização estrita de aba para evitar que a página resete ao digitar
+if 'nav_selection' not in st.session_state:
+    st.session_state.nav_selection = "➕ Novo / Editar Orçamento"
 
 def recalcular_totais():
     total_liquido = 0.0
@@ -378,12 +379,12 @@ def recalcular_totais():
 
 st.title("🏭 Laurenti Móveis — Gestão de Orçamentos")
 
-menu = st.sidebar.radio("Navegação", ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"], key="main_menu")
+# Menu de Navegação na Barra Lateral
+opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
+menu = st.sidebar.radio("Navegação", opcoes_menu, index=opcoes_menu.index(st.session_state.nav_selection), key="radio_menu")
 
-# Sync caso botão de edição peça para mudar a aba
-if 'navigate_to' in st.session_state and st.session_state.navigate_to:
-    menu = st.session_state.navigate_to
-    st.session_state.navigate_to = None
+# Atualiza a seleção do usuário
+st.session_state.nav_selection = menu
 
 # --- ABA 1: NOVO / EDITAR ORÇAMENTO ---
 if menu == "➕ Novo / Editar Orçamento":
@@ -413,35 +414,47 @@ if menu == "➕ Novo / Editar Orçamento":
     with st.expander("👤 Dados do Cliente e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa")
-            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável")
+            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa", key="in_cli_nome")
+            st.session_state.cli_nome = cliente
+            
+            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável", key="in_cli_contato")
+            st.session_state.cli_contato = contato
             
             tipo_opts = ["Residencial", "Comercial", "Arquitetura", "Outros"]
             idx_tipo = tipo_opts.index(st.session_state.get('cli_tipo', 'Residencial')) if st.session_state.get('cli_tipo') in tipo_opts else 0
-            tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo)
+            tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo, key="in_cli_tipo")
+            st.session_state.cli_tipo = tipo_contato
             
             cons_val = st.session_state.get('cli_consultor', ultimas_cond['consultor'])
             idx_cons_padrao = consultores_opts.index(cons_val) if cons_val in consultores_opts else 0
-            consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao)
+            consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao, key="in_cli_cons")
+            st.session_state.cli_consultor = consultor
         
         with col2:
-            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(00) 00000-0000")
-            email = st.text_input("E-mail", value=st.session_state.get('cli_email', ''), placeholder="cliente@email.com")
-            data_atual = st.date_input("Data da Proposta", value=datetime.now().date())
+            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(00) 00000-0000", key="in_cli_tel")
+            st.session_state.cli_tel = telefone
+            
+            email = st.text_input("E-mail", value=st.session_state.get('cli_email', ''), placeholder="cliente@email.com", key="in_cli_email")
+            st.session_state.cli_email = email
+            
+            data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key="in_cli_data")
             
         with col3:
             st.text_input("Proposta Nº (Automático)", value=str(prop_num_atual), disabled=True)
-            dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True)
+            dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True, key="in_cli_val")
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
             
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
-            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']))
+            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']), key="in_cli_prazo")
+            st.session_state.cli_prazo = prazo_entrega
         with col_cond2:
-            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']))
+            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']), key="in_cli_cond")
+            st.session_state.cli_cond = condicoes_pagamento
             
-        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']))
+        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']), key="in_cli_obs")
+        st.session_state.cli_obs = observacoes
 
     st.markdown("---")
     st.subheader("🛋️ Ambientes e Subitens")
@@ -536,7 +549,7 @@ if menu == "➕ Novo / Editar Orçamento":
     tot_liquido, tot_com_opcionais = recalcular_totais()
     
     st.markdown("---")
-    st.markdown("### 📊 Totais e Emissão")
+    st.markdown("### 📊 Totais e Emissão de Orçamento")
     c_tot1, c_tot2 = st.columns(2)
     c_tot1.metric("Total Líquido (Sem Opcionais)", f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     c_tot2.metric("Total Com Opcionais", f"R$ {tot_com_opcionais:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
@@ -583,31 +596,31 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn.commit()
                 st.success(f"✅ Orçamento Proposta Nº {prop_num_atual} salvo com sucesso!")
 
+    # Requisito 2: Botão de Exportação em PDF Garantido e Visível
     with col_btn2:
-        if cliente and st.session_state.ambientes:
-            cli_info = {
-                'proposta_num': prop_num_atual,
-                'cliente': cliente,
-                'contato': contato,
-                'tipo_contato': tipo_contato,
-                'telefone': telefone,
-                'email': email,
-                'consultor': consultor,
-                'data': data_atual.strftime('%d/%m/%Y'),
-                'dias_validade': dias_validade,
-                'validade': data_validade.strftime('%d/%m/%Y'),
-                'prazo_entrega': prazo_entrega,
-                'condicoes_pagamento': condicoes_pagamento,
-                'observacoes': observacoes
-            }
-            pdf_bytes = gerar_pdf_orcamento(cli_info, st.session_state.ambientes)
-            st.download_button(
-                label="📄 Exportar Orçamento em PDF",
-                data=pdf_bytes,
-                file_name=f"Orcamento_{prop_num_atual}_{cliente.replace(' ', '_')}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+        cli_info = {
+            'proposta_num': prop_num_atual,
+            'cliente': cliente if cliente else 'CLIENTE NÃO INFORMADO',
+            'contato': contato,
+            'tipo_contato': tipo_contato,
+            'telefone': telefone,
+            'email': email,
+            'consultor': consultor,
+            'data': data_atual.strftime('%d/%m/%Y'),
+            'dias_validade': dias_validade,
+            'validade': data_validade.strftime('%d/%m/%Y'),
+            'prazo_entrega': prazo_entrega,
+            'condicoes_pagamento': condicoes_pagamento,
+            'observacoes': observacoes
+        }
+        pdf_bytes = gerar_pdf_orcamento(cli_info, st.session_state.ambientes)
+        st.download_button(
+            label="📄 Exportar Orçamento em PDF",
+            data=pdf_bytes,
+            file_name=f"Orcamento_{prop_num_atual}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
 
 # --- ABA 2: ORÇAMENTOS SALVOS ---
 elif menu == "📋 Orçamentos Salvos":
@@ -620,12 +633,12 @@ elif menu == "📋 Orçamentos Salvos":
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
             with st.container():
-                col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns([1.5, 3, 2, 1.2, 1.2])
+                col_a1, col_a2, col_a3, col_a4, col_a5, col_a6 = st.columns([1.5, 2.5, 1.8, 1.2, 1.2, 1.2])
                 col_a1.write(f"**Proposta: #{row['proposta_num']}**")
                 col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR: Carrega absolutamente TODOS os dados e navega sozinho!
+                # Botão Editar (Carrega todos os dados e sincroniza a navegação)
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     st.session_state.edit_index = row['id']
                     
@@ -661,10 +674,38 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.session_state.navigate_to = "➕ Novo / Editar Orçamento"
+                    st.session_state.nav_selection = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                if col_a5.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
+                # Requisito 2: Botão de PDF direto nos Orçamentos Salvos
+                c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
+                o_saved = c.fetchone()
+                ambs_saved = []
+                c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
+                for amb_row in c.fetchall():
+                    itens_saved = []
+                    c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_row[0],))
+                    for item_row in c.fetchall():
+                        itens_saved.append({'descricao': item_row[0], 'valor': item_row[1], 'eh_opcional': bool(item_row[2])})
+                    ambs_saved.append({'nome': amb_row[1], 'especificacoes': amb_row[2], 'total_ambiente': amb_row[3], 'itens': itens_saved})
+
+                cli_saved_info = {
+                    'proposta_num': o_saved[1], 'cliente': o_saved[2], 'contato': o_saved[3], 'tipo_contato': o_saved[4],
+                    'telefone': o_saved[5], 'email': o_saved[6], 'consultor': o_saved[7], 'data': o_saved[8],
+                    'dias_validade': o_saved[9], 'validade': o_saved[10], 'prazo_entrega': o_saved[11],
+                    'condicoes_pagamento': o_saved[12], 'observacoes': o_saved[13]
+                }
+                pdf_saved_bytes = gerar_pdf_orcamento(cli_saved_info, ambs_saved)
+                
+                col_a5.download_button(
+                    label="📄 PDF",
+                    data=pdf_saved_bytes,
+                    file_name=f"Orcamento_{o_saved[1]}_{o_saved[2].replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                    key=f"btn_pdf_orc_{row['id']}"
+                )
+
+                if col_a6.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
                     st.session_state.confirm_del = f"orc_{row['id']}"
 
                 if st.session_state.confirm_del == f"orc_{row['id']}":
