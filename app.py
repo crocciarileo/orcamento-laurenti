@@ -246,7 +246,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
     amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9.5, textColor=colors.HexColor('#0F172A'))
 
-    # Configuração dinâmica de tamanho do Logo
     logo_largura_cm = float(config.get('logo_largura', 5.0))
     col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
@@ -281,7 +280,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     <b>Validade:</b> {cliente_info.get('validade', '')}
     """
     
-    # Larguras adaptáveis de acordo com o tamanho do logo
     width_col_logo = max(logo_largura_cm + 0.5, 4.0) * cm
     width_col_cli = (14.2 * cm) - width_col_logo
     
@@ -322,7 +320,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         table_data.append([Paragraph(amb_header_text, amb_title_style), Paragraph(f"<b>{tot_amb_str}</b>", right_bold)])
         row_styles.append(('BACKGROUND', (0, current_row), (-1, current_row), colors.HexColor('#F1F5F9')))
         
-        # Converte quebras de linha para <br/>
         espec_fmt = amb.get('especificacoes', '').replace('\n', '<br/>')
         desc_amb_text = f"<i>{espec_fmt}</i>" if espec_fmt else ""
         
@@ -403,11 +400,13 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-# Função para resetar limpo o formulário de novo orçamento
+# Função para resetar limpo o formulário de novo orçamento (mantendo últimas condições da fábrica)
 def reseta_formulario_limpo():
     ultimas_cond = get_ultimas_condicoes()
     st.session_state.ambientes = []
     st.session_state.edit_index = None
+    
+    # Limpa variáveis de sessão
     st.session_state.cli_nome = ""
     st.session_state.cli_contato = ""
     st.session_state.cli_tel = ""
@@ -420,18 +419,23 @@ def reseta_formulario_limpo():
     st.session_state.cli_prop = get_proxima_proposta()
     st.session_state.cli_status = "Em Análise"
 
-# Gestão de Navegação
+    # Remove chaves internas do Streamlit para esvaziar os inputs visuais
+    for input_key in ['in_cli_nome', 'in_cli_contato', 'in_cli_tel', 'in_cli_email', 'in_cli_prazo', 'in_cli_cond', 'in_cli_obs']:
+        if input_key in st.session_state:
+            del st.session_state[input_key]
+
+# Gestão de Navegação Instantânea
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
 
-if 'nav_tab' not in st.session_state:
-    st.session_state.nav_tab = opcoes_menu[0]
+if 'radio_menu' not in st.session_state:
+    st.session_state.radio_menu = opcoes_menu[0]
 
+# Trata redirecionamento prioritário
 if 'change_tab_to' in st.session_state and st.session_state.change_tab_to:
-    st.session_state.nav_tab = st.session_state.change_tab_to
+    st.session_state.radio_menu = st.session_state.change_tab_to
     st.session_state.change_tab_to = None
 
-menu = st.sidebar.radio("Navegação", opcoes_menu, index=opcoes_menu.index(st.session_state.nav_tab), key="radio_menu")
-st.session_state.nav_tab = menu
+menu = st.sidebar.radio("Navegação", opcoes_menu, key="radio_menu")
 
 def recalcular_totais():
     total_liquido = 0.0
@@ -708,7 +712,7 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR (Puxa colunas por nome para evitar desalinhamento)
+                # BOTÃO EDITAR (Puxa colunas por nome e redireciona imediatamente)
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -725,6 +729,15 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_cond = o['condicoes_pagamento'] or ""
                     st.session_state.cli_obs = o['observacoes'] or ""
                     st.session_state.cli_status = o.get('status', 'Em Análise')
+                    
+                    # Atualiza chaves visuais diretamente
+                    st.session_state.in_cli_nome = st.session_state.cli_nome
+                    st.session_state.in_cli_contato = st.session_state.cli_contato
+                    st.session_state.in_cli_tel = st.session_state.cli_tel
+                    st.session_state.in_cli_email = st.session_state.cli_email
+                    st.session_state.in_cli_prazo = st.session_state.cli_prazo
+                    st.session_state.in_cli_cond = st.session_state.cli_cond
+                    st.session_state.in_cli_obs = st.session_state.cli_obs
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -766,6 +779,14 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_cond = o['condicoes_pagamento'] or ""
                     st.session_state.cli_obs = o['observacoes'] or ""
                     st.session_state.cli_status = "Em Análise"
+                    
+                    st.session_state.in_cli_nome = st.session_state.cli_nome
+                    st.session_state.in_cli_contato = st.session_state.cli_contato
+                    st.session_state.in_cli_tel = st.session_state.cli_tel
+                    st.session_state.in_cli_email = st.session_state.cli_email
+                    st.session_state.in_cli_prazo = st.session_state.cli_prazo
+                    st.session_state.in_cli_cond = st.session_state.cli_cond
+                    st.session_state.in_cli_obs = st.session_state.cli_obs
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -869,7 +890,6 @@ elif menu == "⚙️ Configurações":
         telefone = st.text_input("Telefone", value=config.get('telefone', '(17) 3576-1464'))
         email = st.text_input("E-mail", value=config.get('email', 'contato@laurentimoveis.com.br'))
         
-        # Campo para ajuste de tamanho da logo no PDF
         logo_largura = st.slider("Largura da Logo no PDF (cm)", min_value=3.0, max_value=8.0, value=float(config.get('logo_largura', 5.0)), step=0.5)
         
         if st.form_submit_button("💾 Salvar Dados da Empresa"):
