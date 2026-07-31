@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import io
 import os
+import uuid
 from PIL import Image
 
 # ReportLab para PDF institucional Laurenti Móveis
@@ -107,7 +108,7 @@ def init_db():
         )
     """)
     
-    # Migração status em orcamentos
+    # Migração status
     c.execute("PRAGMA table_info(orcamentos)")
     colunas_orc = [col[1] for col in c.fetchall()]
     if 'status' not in colunas_orc:
@@ -294,12 +295,14 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         except Exception:
             pass
 
+    # CORREÇÃO 3: Telefone e E-mail em linhas separadas
     cli_text = f"""
     <b>Cliente:</b> {cliente_info.get('cliente', '')}<br/>
     <b>Contato:</b> {cliente_info.get('contato', '')}<br/>
     <b>Consultor:</b> {cliente_info.get('consultor', 'N/A')}<br/>
     <b>Tipo de Contato:</b> {cliente_info.get('tipo_contato', 'Residencial')}<br/>
-    <b>Telefone:</b> {cliente_info.get('telefone', '')} &nbsp;&nbsp;&nbsp; <b>E-mail:</b> {cliente_info.get('email', '')}
+    <b>Telefone:</b> {cliente_info.get('telefone', '')}<br/>
+    <b>E-mail:</b> {cliente_info.get('email', '')}
     """
     
     p_num = cliente_info.get('proposta_num', 1)
@@ -384,10 +387,31 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_itens)
     story.append(Spacer(1, 10))
 
+    # CORREÇÃO 2: Layout de Totais e Condições separados e bem alinhados
     tot_com_opc = tot_liquido + tot_opcionais
     tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+    # Tabela 1: Caixa de Totais à Direita
+    totais_box_text = f"""
+    <font size=9 color='#64748B'><b>Total Líquido:</b></font> &nbsp;&nbsp;&nbsp;&nbsp; <font size=11 color='#0F172A'><b>{tot_liquido_str}</b></font><br/>
+    <font size=8 color='#64748B'>Total c/ Opcionais:</font> &nbsp;&nbsp;&nbsp;&nbsp; <font size=10 color='#D97706'><b>{tot_com_opc_str}</b></font>
+    """
+    
+    t_totais = Table([
+        ["", Paragraph(totais_box_text, right_bold)]
+    ], colWidths=[10.6*cm, 8.0*cm])
+    
+    t_totais.setStyle(TableStyle([
+        ('BOX', (1,0), (1,0), 0.5, colors.HexColor('#CBD5E1')),
+        ('BACKGROUND', (1,0), (1,0), colors.HexColor('#F1F5F9')),
+        ('PADDING', (1,0), (1,0), 8),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    story.append(t_totais)
+    story.append(Spacer(1, 8))
+
+    # Tabela 2: Detalhes e Observações em Largura Total Abaixo
     obs_fmt = cliente_info.get('observacoes', '').replace('\n', '<br/>')
     cond_text = f"""
     <b>Prazo de Entrega:</b> {cliente_info.get('prazo_entrega', '')}<br/>
@@ -395,23 +419,15 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     <b>Observações:</b> {obs_fmt}
     """
     
-    totais_box_text = f"""
-    <font size=9 color='#64748B'><b>Total Líquido:</b></font><br/>
-    <font size=11 color='#0F172A'><b>{tot_liquido_str}</b></font><br/><br/>
-    <font size=8 color='#64748B'>Total c/ Opcionais:</font><br/>
-    <font size=10 color='#D97706'><b>{tot_com_opc_str}</b></font>
-    """
-    
     t_cond = Table([
-        [Paragraph(cond_text, body_style), Paragraph(totais_box_text, right_bold)]
-    ], colWidths=[13.6*cm, 5*cm])
+        [Paragraph(cond_text, body_style)]
+    ], colWidths=[18.6*cm])
     
     t_cond.setStyle(TableStyle([
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-        ('BACKGROUND', (0,0), (0,0), colors.HexColor('#F8FAFC')),
-        ('BACKGROUND', (1,0), (1,0), colors.HexColor('#F1F5F9')),
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
         ('PADDING', (0,0), (-1,-1), 8),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
     ]))
     story.append(t_cond)
 
@@ -434,7 +450,6 @@ if 'confirm_del' not in st.session_state:
 if 'form_version' not in st.session_state:
     st.session_state.form_version = 1
 
-# Reset do formulário garantindo campos limpos via mudança de versão de chave
 def reseta_formulario_limpo():
     ultimas_cond = get_ultimas_condicoes()
     st.session_state.ambientes = []
@@ -452,10 +467,8 @@ def reseta_formulario_limpo():
     st.session_state.cli_prop = get_proxima_proposta()
     st.session_state.cli_status = ultimas_cond['status']
     
-    # Incrementa a versão do formulário para forçar renovação das chaves dos inputs no Streamlit
     st.session_state.form_version += 1
 
-# Navegação
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
 
 if 'radio_menu' not in st.session_state:
@@ -576,6 +589,13 @@ if menu == "➕ Novo / Editar Orçamento":
     if st.session_state.ambientes:
         for idx_amb, amb in enumerate(st.session_state.ambientes):
             ordem_amb = idx_amb + 1
+            
+            # CORREÇÃO 1: Garante ID único permanente em cada subitem para evitar troca de valores na ordenação visual
+            for item in amb['itens']:
+                if 'id' not in item:
+                    item['id'] = str(uuid.uuid4())
+
+            # Ordena visualmente (Normais primeiro, Opcionais depois)
             amb['itens'] = sorted(amb['itens'], key=lambda x: x['eh_opcional'])
 
             with st.expander(f"🛋️ **Item {ordem_amb}: {amb['nome'].upper()}** — Total: R$ {amb['total_ambiente']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), expanded=True):
@@ -619,6 +639,7 @@ if menu == "➕ Novo / Editar Orçamento":
                     if btn_sub:
                         if desc_sub and val_sub > 0:
                             amb['itens'].append({
+                                'id': str(uuid.uuid4()),
                                 'descricao': desc_sub,
                                 'valor': val_sub,
                                 'eh_opcional': opc_sub
@@ -627,18 +648,20 @@ if menu == "➕ Novo / Editar Orçamento":
 
                 if amb['itens']:
                     for idx_item, item in enumerate(amb['itens']):
+                        item_id = item['id']
                         tag_opc = " (OPCIONAL)" if item['eh_opcional'] else ""
+                        
                         col_it1, col_it2, col_it3, col_it4 = st.columns([3, 1.5, 1, 0.5])
                         with col_it1:
-                            item['descricao'] = st.text_area(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{v}_{idx_amb}_{idx_item}", height=68)
+                            item['descricao'] = st.text_area(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{item_id}", height=68)
                         with col_it2:
-                            item['valor'] = st.number_input("Valor R$", value=float(item['valor']), step=50.0, format="%.2f", key=f"item_val_{v}_{idx_amb}_{idx_item}")
+                            item['valor'] = st.number_input("Valor R$", value=float(item['valor']), step=50.0, format="%.2f", key=f"item_val_{item_id}")
                         with col_it3:
                             st.write(" ")
-                            item['eh_opcional'] = st.checkbox("Opcional?", value=bool(item['eh_opcional']), key=f"item_opc_{v}_{idx_amb}_{idx_item}")
+                            item['eh_opcional'] = st.checkbox("Opcional?", value=bool(item['eh_opcional']), key=f"item_opc_{item_id}")
                         with col_it4:
                             st.write(" ")
-                            if st.button("❌", key=f"del_item_{v}_{idx_amb}_{idx_item}"):
+                            if st.button("❌", key=f"del_item_{item_id}"):
                                 amb['itens'].pop(idx_item)
                                 st.rerun()
 
@@ -774,6 +797,7 @@ elif menu == "📋 Orçamentos Salvos":
                         for item_row in c.fetchall():
                             item_dict = dict(item_row)
                             itens_db.append({
+                                'id': str(uuid.uuid4()),
                                 'descricao': item_dict['descricao'],
                                 'valor': item_dict['valor'],
                                 'eh_opcional': bool(item_dict['eh_opcional'])
@@ -817,6 +841,7 @@ elif menu == "📋 Orçamentos Salvos":
                         for item_row in c.fetchall():
                             item_dict = dict(item_row)
                             itens_db.append({
+                                'id': str(uuid.uuid4()),
                                 'descricao': item_dict['descricao'],
                                 'valor': item_dict['valor'],
                                 'eh_opcional': bool(item_dict['eh_opcional'])
@@ -955,11 +980,9 @@ elif menu == "⚙️ Configurações":
                 c_del1, c_del2 = st.columns(2)
                 
                 if c_del1.button("✅ Confirmar", key=f"conf_del_status_{st_item}"):
-                    # Deleta o status do cadastro
                     c.execute("DELETE FROM status_comercial WHERE nome = ?", (st_item,))
                     conn.commit()
                     
-                    # Define o novo status padrão de fallback
                     status_restantes = get_status_list()
                     fallback_status = status_restantes[0] if status_restantes else "Em Análise"
                     if not status_restantes:
@@ -967,7 +990,6 @@ elif menu == "⚙️ Configurações":
                         conn.commit()
                         fallback_status = "Em Análise"
                     
-                    # Migra os orçamentos que usavam o status excluído
                     c.execute("UPDATE orcamentos SET status = ? WHERE status = ?", (fallback_status, st_item))
                     conn.commit()
                     
