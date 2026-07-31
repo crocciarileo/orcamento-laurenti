@@ -50,6 +50,14 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '')
         """)
 
+    # MIGRAÇÃO AUTOMÁTICA: config_empresa
+    c.execute("PRAGMA table_info(config_empresa)")
+    cols_config = [col[1] for col in c.fetchall()]
+    if "ie" not in cols_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN ie TEXT DEFAULT '186000158114'")
+    if "logo_path" not in cols_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_path TEXT DEFAULT ''")
+
     # Tabela de Consultores
     c.execute("""
         CREATE TABLE IF NOT EXISTS consultores (
@@ -87,14 +95,12 @@ def init_db():
         )
     """)
 
-    # MIGRAÇÕES AUTOMÁTICAS (Corrige os bancos criados em versões anteriores)
+    # MIGRAÇÃO AUTOMÁTICA: orcamentos
     c.execute("PRAGMA table_info(orcamentos)")
-    colunas_existentes = [coluna[1] for coluna in c.fetchall()]
-    
-    if "proposta_num" not in colunas_existentes:
+    cols_orc = [col[1] for col in c.fetchall()]
+    if "proposta_num" not in cols_orc:
         c.execute("ALTER TABLE orcamentos ADD COLUMN proposta_num TEXT DEFAULT '2358'")
-        
-    if "consultor" not in colunas_existentes:
+    if "consultor" not in cols_orc:
         c.execute("ALTER TABLE orcamentos ADD COLUMN consultor TEXT")
 
     # Tabela de Ambientes
@@ -130,7 +136,21 @@ init_db()
 # Funções Auxiliares
 def get_config():
     conn = get_connection()
-    return pd.read_sql_query("SELECT * FROM config_empresa WHERE id = 1", conn).iloc[0].to_dict()
+    df = pd.read_sql_query("SELECT * FROM config_empresa WHERE id = 1", conn)
+    if not df.empty:
+        d = df.iloc[0].to_dict()
+        d.setdefault('ie', '186000158114')
+        d.setdefault('logo_path', '')
+        return d
+    return {
+        'nome_empresa': 'Fábrica de Móveis Laurenti Ltda',
+        'cnpj': '44.331.015/0001-08',
+        'ie': '186000158114',
+        'endereco': 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP',
+        'telefone': '(17) 3576-1464',
+        'email': 'contato@laurentimoveis.com.br',
+        'logo_path': ''
+    }
 
 def get_consultores():
     conn = get_connection()
@@ -166,8 +186,8 @@ class NumberedCanvas(canvas.Canvas):
         self.line(1.2*cm, 1.8*cm, A4[0] - 1.2*cm, 1.8*cm)
         
         # Dados da Fábrica
-        line1 = f"{config['nome_empresa']} CNPJ: {config['cnpj']} IE: {config['ie']}"
-        line2 = f"{config['endereco']} / Fone: {config['telefone']}"
+        line1 = f"{config.get('nome_empresa', '')} CNPJ: {config.get('cnpj', '')} IE: {config.get('ie', '')}"
+        line2 = f"{config.get('endereco', '')} / Fone: {config.get('telefone', '')}"
         
         self.drawString(1.2*cm, 1.3*cm, line1)
         self.drawString(1.2*cm, 0.9*cm, line2)
@@ -202,14 +222,14 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.HexColor('#222222'))
     body_bold = ParagraphStyle('BodyBold', parent=body_style, fontName='Helvetica-Bold')
     right_bold = ParagraphStyle('RightBold', parent=body_bold, alignment=2)
-    right_normal = ParagraphStyle('RightNormal', parent=body_style, alignment=2)
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
 
     # Bloco do Cabeçalho (Logo / Dados do Cliente / Bloco Proposta)
     col_logo = Paragraph("<b>[ LOGO LAURENTI ]</b>", body_bold)
-    if config['logo_path'] and os.path.exists(config['logo_path']):
+    logo_p = config.get('logo_path', '')
+    if logo_p and os.path.exists(logo_p):
         try:
-            col_logo = RLImage(config['logo_path'], width=3.5*cm, height=1.5*cm)
+            col_logo = RLImage(logo_p, width=3.5*cm, height=1.5*cm)
         except Exception:
             pass
 
@@ -253,14 +273,12 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         ordem_amb = idx_a + 1
         nome_amb_upper = amb['nome'].upper()
         
-        # Agrupar itens normais e opcionais (Opções por último)
         itens_normais = [i for i in amb['itens'] if not i['eh_opcional']]
         itens_opcionais = [i for i in amb['itens'] if i['eh_opcional']]
         
         tot_amb = sum(float(i['valor']) for i in itens_normais)
         tot_liquido += tot_amb
         
-        # Texto descritivo do ambiente
         desc_amb_text = f"<b>{ordem_amb}- {nome_amb_upper}:</b> {amb.get('especificacoes', '')}"
         
         for item in itens_normais:
@@ -618,17 +636,19 @@ elif menu == "⚙️ Configurações":
         c.execute("UPDATE config_empresa SET logo_path = ? WHERE id = 1", (logo_path,))
         conn.commit()
         st.success("Logo atualizada com sucesso!")
+        st.rerun()
 
-    if config['logo_path'] and os.path.exists(config['logo_path']):
-        st.image(config['logo_path'], width=200, caption="Logo Atual")
+    logo_actual = config.get('logo_path', '')
+    if logo_actual and os.path.exists(logo_actual):
+        st.image(logo_actual, width=200, caption="Logo Atual")
 
     with st.form("form_config_empresa"):
-        nome_empresa = st.text_input("Razão Social", value=config['nome_empresa'])
-        cnpj = st.text_input("CNPJ", value=config['cnpj'])
-        ie = st.text_input("Inscrição Estadual (IE)", value=config['ie'])
-        endereco = st.text_input("Endereço Completo", value=config['endereco'])
-        telefone = st.text_input("Telefone", value=config['telefone'])
-        email = st.text_input("E-mail", value=config['email'])
+        nome_empresa = st.text_input("Razão Social", value=config.get('nome_empresa', ''))
+        cnpj = st.text_input("CNPJ", value=config.get('cnpj', ''))
+        ie = st.text_input("Inscrição Estadual (IE)", value=config.get('ie', ''))
+        endereco = st.text_input("Endereço Completo", value=config.get('endereco', ''))
+        telefone = st.text_input("Telefone", value=config.get('telefone', ''))
+        email = st.text_input("E-mail", value=config.get('email', ''))
         
         if st.form_submit_button("💾 Salvar Dados da Empresa"):
             c.execute("""
