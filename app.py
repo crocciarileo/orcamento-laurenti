@@ -53,11 +53,24 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0)
         """)
 
-    # Migração automática de colunas para config_empresa
+    # Migração logo_largura
     c.execute("PRAGMA table_info(config_empresa)")
     colunas_config = [col[1] for col in c.fetchall()]
     if 'logo_largura' not in colunas_config:
         c.execute("ALTER TABLE config_empresa ADD COLUMN logo_largura REAL DEFAULT 5.0")
+
+    # Status Comercial Dinâmico
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS status_comercial (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT UNIQUE NOT NULL
+        )
+    """)
+    
+    c.execute("SELECT COUNT(*) FROM status_comercial")
+    if c.fetchone()[0] == 0:
+        status_iniciais = [("Em Análise",), ("Aprovado",), ("Em Produção",), ("Perdido",)]
+        c.executemany("INSERT INTO status_comercial (nome) VALUES (?)", status_iniciais)
 
     # Consultores
     c.execute("""
@@ -94,7 +107,7 @@ def init_db():
         )
     """)
     
-    # Migração automática caso a coluna status não exista
+    # Migração status em orcamentos
     c.execute("PRAGMA table_info(orcamentos)")
     colunas_orc = [col[1] for col in c.fetchall()]
     if 'status' not in colunas_orc:
@@ -149,6 +162,13 @@ def get_config():
         return d
     return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0}
 
+def get_status_list():
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM status_comercial ORDER BY id ASC", conn)
+    if not df.empty:
+        return df['nome'].tolist()
+    return ["Em Análise"]
+
 def get_consultores():
     conn = get_connection()
     return pd.read_sql_query("SELECT * FROM consultores ORDER BY nome ASC", conn)
@@ -169,18 +189,29 @@ def get_proxima_proposta():
 def get_ultimas_condicoes():
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes FROM orcamentos ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes, status FROM orcamentos ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
+    status_disponiveis = get_status_list()
+    default_status = status_disponiveis[0] if status_disponiveis else "Em Análise"
+    
     if row:
+        st_val = row['status'] if row['status'] in status_disponiveis else default_status
         return {
             'consultor': row['consultor'] or 'Sem Consultor', 
             'prazo_entrega': row['prazo_entrega'] or '120 dias após medições finais.', 
             'condicoes_pagamento': row['condicoes_pagamento'] or '8 PARCELAS', 
-            'observacoes': row['observacoes'] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'
+            'observacoes': row['observacoes'] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm',
+            'status': st_val
         }
-    return {'consultor': 'Sem Consultor', 'prazo_entrega': '120 dias após medições finais.', 'condicoes_pagamento': '8 PARCELAS', 'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
+    return {
+        'consultor': 'Sem Consultor', 
+        'prazo_entrega': '120 dias após medições finais.', 
+        'condicoes_pagamento': '8 PARCELAS', 
+        'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm',
+        'status': default_status
+    }
 
-# Canvas Dinâmico com Numeração de Páginas (Página X de Y)
+# Canvas Dinâmico com Numeração de Páginas
 class NumberedCanvas(canvas.Canvas):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -400,13 +431,15 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-# Função para resetar limpo o formulário de novo orçamento (mantendo últimas condições da fábrica)
+if 'form_version' not in st.session_state:
+    st.session_state.form_version = 1
+
+# Reset do formulário garantindo campos limpos via mudança de versão de chave
 def reseta_formulario_limpo():
     ultimas_cond = get_ultimas_condicoes()
     st.session_state.ambientes = []
     st.session_state.edit_index = None
     
-    # Limpa variáveis de sessão
     st.session_state.cli_nome = ""
     st.session_state.cli_contato = ""
     st.session_state.cli_tel = ""
@@ -417,20 +450,17 @@ def reseta_formulario_limpo():
     st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
     st.session_state.cli_obs = ultimas_cond['observacoes']
     st.session_state.cli_prop = get_proxima_proposta()
-    st.session_state.cli_status = "Em Análise"
+    st.session_state.cli_status = ultimas_cond['status']
+    
+    # Incrementa a versão do formulário para forçar renovação das chaves dos inputs no Streamlit
+    st.session_state.form_version += 1
 
-    # Remove chaves internas do Streamlit para esvaziar os inputs visuais
-    for input_key in ['in_cli_nome', 'in_cli_contato', 'in_cli_tel', 'in_cli_email', 'in_cli_prazo', 'in_cli_cond', 'in_cli_obs']:
-        if input_key in st.session_state:
-            del st.session_state[input_key]
-
-# Gestão de Navegação Instantânea
+# Navegação
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
 
 if 'radio_menu' not in st.session_state:
     st.session_state.radio_menu = opcoes_menu[0]
 
-# Trata redirecionamento prioritário
 if 'change_tab_to' in st.session_state and st.session_state.change_tab_to:
     st.session_state.radio_menu = st.session_state.change_tab_to
     st.session_state.change_tab_to = None
@@ -461,6 +491,7 @@ if menu == "➕ Novo / Editar Orçamento":
     ultimas_cond = get_ultimas_condicoes()
     df_cons = get_consultores()
     consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["Sem Consultor"]
+    status_opts = get_status_list()
 
     if st.button("✨ Criar Novo Orçamento Limpo"):
         reseta_formulario_limpo()
@@ -468,56 +499,57 @@ if menu == "➕ Novo / Editar Orçamento":
 
     prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
     prop_formatted = f"{int(prop_num_atual):04d}" if str(prop_num_atual).isdigit() else str(prop_num_atual)
+    
+    v = st.session_state.form_version
 
     with st.expander("👤 Dados do Cliente, Status e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa", key="in_cli_nome")
+            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa", key=f"in_cli_nome_{v}")
             st.session_state.cli_nome = cliente
             
-            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável", key="in_cli_contato")
+            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável", key=f"in_cli_contato_{v}")
             st.session_state.cli_contato = contato
             
             tipo_opts = ["Residencial", "Comercial", "Arquitetura", "Outros"]
             idx_tipo = tipo_opts.index(st.session_state.get('cli_tipo', 'Residencial')) if st.session_state.get('cli_tipo') in tipo_opts else 0
-            tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo, key="in_cli_tipo")
+            tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo, key=f"in_cli_tipo_{v}")
             st.session_state.cli_tipo = tipo_contato
             
             cons_val = st.session_state.get('cli_consultor', ultimas_cond['consultor'])
             idx_cons_padrao = consultores_opts.index(cons_val) if cons_val in consultores_opts else 0
-            consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao, key="in_cli_cons")
+            consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao, key=f"in_cli_cons_{v}")
             st.session_state.cli_consultor = consultor
         
         with col2:
-            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(00) 00000-0000", key="in_cli_tel")
+            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(00) 00000-0000", key=f"in_cli_tel_{v}")
             st.session_state.cli_tel = telefone
             
-            email = st.text_input("E-mail", value=st.session_state.get('cli_email', ''), placeholder="cliente@email.com", key="in_cli_email")
+            email = st.text_input("E-mail", value=st.session_state.get('cli_email', ''), placeholder="cliente@email.com", key=f"in_cli_email_{v}")
             st.session_state.cli_email = email
             
-            data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key="in_cli_data")
+            data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key=f"in_cli_data_{v}")
             
-            status_opts = ["Em Análise", "Aprovado", "Em Produção", "Perdido"]
-            status_val = st.session_state.get('cli_status', 'Em Análise')
+            status_val = st.session_state.get('cli_status', ultimas_cond['status'])
             idx_status = status_opts.index(status_val) if status_val in status_opts else 0
-            status_orcamento = st.selectbox("Status Comercial", status_opts, index=idx_status, key="in_cli_status")
+            status_orcamento = st.selectbox("Status Comercial", status_opts, index=idx_status, key=f"in_cli_status_{v}")
             st.session_state.cli_status = status_orcamento
             
         with col3:
             st.text_input("Proposta Nº (Automático)", value=prop_formatted, disabled=True)
-            dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True, key="in_cli_val")
+            dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True, key=f"in_cli_val_{v}")
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
             
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
-            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']), key="in_cli_prazo")
+            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']), key=f"in_cli_prazo_{v}")
             st.session_state.cli_prazo = prazo_entrega
         with col_cond2:
-            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']), key="in_cli_cond")
+            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']), key=f"in_cli_cond_{v}")
             st.session_state.cli_cond = condicoes_pagamento
             
-        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']), key="in_cli_obs")
+        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']), key=f"in_cli_obs_{v}")
         st.session_state.cli_obs = observacoes
 
     st.markdown("---")
@@ -550,28 +582,28 @@ if menu == "➕ Novo / Editar Orçamento":
                 
                 col_e1, col_e2, col_e3 = st.columns([2, 3, 1])
                 with col_e1:
-                    amb['nome'] = st.text_input(f"Nome #{ordem_amb}", value=amb['nome'], key=f"edit_nome_{idx_amb}")
+                    amb['nome'] = st.text_input(f"Nome #{ordem_amb}", value=amb['nome'], key=f"edit_nome_{v}_{idx_amb}")
                 with col_e2:
-                    amb['especificacoes'] = st.text_area(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{idx_amb}", height=68)
+                    amb['especificacoes'] = st.text_area(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{v}_{idx_amb}", height=68)
                 with col_e3:
                     st.write(" ")
-                    if st.button("🗑️ Remover Ambiente", key=f"del_amb_btn_{idx_amb}"):
+                    if st.button("🗑️ Remover Ambiente", key=f"del_amb_btn_{v}_{idx_amb}"):
                         st.session_state.confirm_del = f"amb_{idx_amb}"
 
                 if st.session_state.confirm_del == f"amb_{idx_amb}":
                     st.warning("⚠️ Confirma a exclusão deste ambiente e todos seus itens?")
                     c_del1, c_del2 = st.columns(2)
-                    if c_del1.button("✅ Confirmar Exclusão", key=f"conf_del_amb_{idx_amb}"):
+                    if c_del1.button("✅ Confirmar Exclusão", key=f"conf_del_amb_{v}_{idx_amb}"):
                         st.session_state.ambientes.pop(idx_amb)
                         st.session_state.confirm_del = None
                         st.rerun()
-                    if c_del2.button("❌ Cancelar", key=f"canc_del_amb_{idx_amb}"):
+                    if c_del2.button("❌ Cancelar", key=f"canc_del_amb_{v}_{idx_amb}"):
                         st.session_state.confirm_del = None
                         st.rerun()
 
                 st.markdown(f"##### Subitens do Ambiente {ordem_amb}")
                 
-                with st.form(f"form_add_subitem_{idx_amb}", clear_on_submit=True):
+                with st.form(f"form_add_subitem_{v}_{idx_amb}", clear_on_submit=True):
                     col_i1, col_i2, col_i3, col_i4 = st.columns([3, 1.5, 1, 1])
                     with col_i1:
                         desc_sub = st.text_area("Descrição do Subitem", placeholder="Ex: Armário aéreo 3,67m\n8 portas basculantes", height=68)
@@ -598,15 +630,15 @@ if menu == "➕ Novo / Editar Orçamento":
                         tag_opc = " (OPCIONAL)" if item['eh_opcional'] else ""
                         col_it1, col_it2, col_it3, col_it4 = st.columns([3, 1.5, 1, 0.5])
                         with col_it1:
-                            item['descricao'] = st.text_area(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{idx_amb}_{idx_item}", height=68)
+                            item['descricao'] = st.text_area(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{v}_{idx_amb}_{idx_item}", height=68)
                         with col_it2:
-                            item['valor'] = st.number_input("Valor R$", value=float(item['valor']), step=50.0, format="%.2f", key=f"item_val_{idx_amb}_{idx_item}")
+                            item['valor'] = st.number_input("Valor R$", value=float(item['valor']), step=50.0, format="%.2f", key=f"item_val_{v}_{idx_amb}_{idx_item}")
                         with col_it3:
                             st.write(" ")
-                            item['eh_opcional'] = st.checkbox("Opcional?", value=bool(item['eh_opcional']), key=f"item_opc_{idx_amb}_{idx_item}")
+                            item['eh_opcional'] = st.checkbox("Opcional?", value=bool(item['eh_opcional']), key=f"item_opc_{v}_{idx_amb}_{idx_item}")
                         with col_it4:
                             st.write(" ")
-                            if st.button("❌", key=f"del_item_{idx_amb}_{idx_item}"):
+                            if st.button("❌", key=f"del_item_{v}_{idx_amb}_{idx_item}"):
                                 amb['itens'].pop(idx_item)
                                 st.rerun()
 
@@ -693,7 +725,8 @@ elif menu == "📋 Orçamentos Salvos":
     conn = get_connection()
     c = conn.cursor()
     
-    filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos", "Em Análise", "Aprovado", "Em Produção", "Perdido"])
+    status_list = get_status_list()
+    filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos"] + status_list)
     
     if filtro_status == "Todos":
         df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos ORDER BY id DESC", conn)
@@ -706,13 +739,13 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a1, col_a2, col_a3, col_a4, col_a5, col_a6, col_a7 = st.columns([1.2, 2.2, 1.5, 1.2, 1.0, 1.0, 1.0])
                 
                 p_fmt = f"{int(row['proposta_num']):04d}" if str(row['proposta_num']).isdigit() else str(row['proposta_num'])
-                status_atual = row.get('status', 'Em Análise')
+                status_atual = row.get('status', status_list[0] if status_list else 'Em Análise')
                 
                 col_a1.write(f"**#{p_fmt}**")
                 col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR (Puxa colunas por nome e redireciona imediatamente)
+                # BOTÃO EDITAR
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -728,16 +761,9 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_prazo = o['prazo_entrega'] or ""
                     st.session_state.cli_cond = o['condicoes_pagamento'] or ""
                     st.session_state.cli_obs = o['observacoes'] or ""
-                    st.session_state.cli_status = o.get('status', 'Em Análise')
+                    st.session_state.cli_status = o.get('status', status_list[0] if status_list else 'Em Análise')
                     
-                    # Atualiza chaves visuais diretamente
-                    st.session_state.in_cli_nome = st.session_state.cli_nome
-                    st.session_state.in_cli_contato = st.session_state.cli_contato
-                    st.session_state.in_cli_tel = st.session_state.cli_tel
-                    st.session_state.in_cli_email = st.session_state.cli_email
-                    st.session_state.in_cli_prazo = st.session_state.cli_prazo
-                    st.session_state.in_cli_cond = st.session_state.cli_cond
-                    st.session_state.in_cli_obs = st.session_state.cli_obs
+                    st.session_state.form_version += 1
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -778,15 +804,9 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_prazo = o['prazo_entrega'] or ""
                     st.session_state.cli_cond = o['condicoes_pagamento'] or ""
                     st.session_state.cli_obs = o['observacoes'] or ""
-                    st.session_state.cli_status = "Em Análise"
+                    st.session_state.cli_status = status_list[0] if status_list else "Em Análise"
                     
-                    st.session_state.in_cli_nome = st.session_state.cli_nome
-                    st.session_state.in_cli_contato = st.session_state.cli_contato
-                    st.session_state.in_cli_tel = st.session_state.cli_tel
-                    st.session_state.in_cli_email = st.session_state.cli_email
-                    st.session_state.in_cli_prazo = st.session_state.cli_prazo
-                    st.session_state.in_cli_cond = st.session_state.cli_cond
-                    st.session_state.in_cli_obs = st.session_state.cli_obs
+                    st.session_state.form_version += 1
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -862,7 +882,7 @@ elif menu == "📋 Orçamentos Salvos":
 
 # --- ABA 3: CONFIGURAÇÕES E LOGO ---
 elif menu == "⚙️ Configurações":
-    st.subheader("⚙️ Configurações da Empresa e Consultores")
+    st.subheader("⚙️ Configurações da Empresa, Consultores e Status")
     conn = get_connection()
     c = conn.cursor()
     
@@ -903,33 +923,90 @@ elif menu == "⚙️ Configurações":
             st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 👤 Gestão de Consultores")
+    col_cfg1, col_cfg2 = st.columns(2)
     
-    with st.form("form_add_consultor", clear_on_submit=True):
-        novo_c = st.text_input("Nome do Novo Consultor")
-        if st.form_submit_button("➕ Cadastrar Consultor"):
-            if novo_c:
-                c.execute("INSERT INTO consultores (nome) VALUES (?)", (novo_c,))
-                conn.commit()
-                st.rerun()
+    # Gestão de Status Comercial
+    with col_cfg1:
+        st.markdown("#### 🏷️ Gestão de Status Comercial")
+        
+        with st.form("form_add_status", clear_on_submit=True):
+            novo_st = st.text_input("Nome do Novo Status Comercial")
+            if st.form_submit_button("➕ Cadastrar Status"):
+                if novo_st:
+                    try:
+                        c.execute("INSERT INTO status_comercial (nome) VALUES (?)", (novo_st.strip(),))
+                        conn.commit()
+                        st.success(f"Status '{novo_st}' cadastrado!")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("Este status já está cadastrado.")
 
-    df_c = get_consultores()
-    if not df_c.empty:
-        for _, r in df_c.iterrows():
-            col_cons1, col_cons2 = st.columns([4, 1])
-            col_cons1.write(f"👤 **{r['nome']}**")
+        status_atuais = get_status_list()
+        for st_item in status_atuais:
+            col_s1, col_s2 = st.columns([3, 1])
+            col_s1.write(f"🏷️ **{st_item}**")
             
-            if col_cons2.button("🗑️ Excluir", key=f"del_cons_btn_{r['id']}"):
-                st.session_state.confirm_del = f"cons_{r['id']}"
+            if col_s2.button("🗑️ Excluir", key=f"del_status_btn_{st_item}"):
+                st.session_state.confirm_del = f"status_{st_item}"
 
-            if st.session_state.confirm_del == f"cons_{r['id']}":
-                st.warning(f"⚠️ Remover o consultor '{r['nome']}'?")
+            if st.session_state.confirm_del == f"status_{st_item}":
+                st.warning(f"⚠️ Confirma excluir o status '{st_item}'?")
+                st.info("Orçamentos com este status serão migrados para o status padrão.")
                 c_del1, c_del2 = st.columns(2)
-                if c_del1.button("✅ Confirmar", key=f"conf_del_cons_{r['id']}"):
-                    c.execute("DELETE FROM consultores WHERE id = ?", (r['id'],))
+                
+                if c_del1.button("✅ Confirmar", key=f"conf_del_status_{st_item}"):
+                    # Deleta o status do cadastro
+                    c.execute("DELETE FROM status_comercial WHERE nome = ?", (st_item,))
                     conn.commit()
+                    
+                    # Define o novo status padrão de fallback
+                    status_restantes = get_status_list()
+                    fallback_status = status_restantes[0] if status_restantes else "Em Análise"
+                    if not status_restantes:
+                        c.execute("INSERT INTO status_comercial (nome) VALUES (?)", ("Em Análise",))
+                        conn.commit()
+                        fallback_status = "Em Análise"
+                    
+                    # Migra os orçamentos que usavam o status excluído
+                    c.execute("UPDATE orcamentos SET status = ? WHERE status = ?", (fallback_status, st_item))
+                    conn.commit()
+                    
                     st.session_state.confirm_del = None
                     st.rerun()
-                if c_del2.button("❌ Cancelar", key=f"canc_del_cons_{r['id']}"):
+                    
+                if c_del2.button("❌ Cancelar", key=f"canc_del_status_{st_item}"):
                     st.session_state.confirm_del = None
                     st.rerun()
+
+    # Gestão de Consultores
+    with col_cfg2:
+        st.markdown("#### 👤 Gestão de Consultores")
+        
+        with st.form("form_add_consultor", clear_on_submit=True):
+            novo_c = st.text_input("Nome do Novo Consultor")
+            if st.form_submit_button("➕ Cadastrar Consultor"):
+                if novo_c:
+                    c.execute("INSERT INTO consultores (nome) VALUES (?)", (novo_c.strip(),))
+                    conn.commit()
+                    st.rerun()
+
+        df_c = get_consultores()
+        if not df_c.empty:
+            for _, r in df_c.iterrows():
+                col_cons1, col_cons2 = st.columns([3, 1])
+                col_cons1.write(f"👤 **{r['nome']}**")
+                
+                if col_cons2.button("🗑️ Excluir", key=f"del_cons_btn_{r['id']}"):
+                    st.session_state.confirm_del = f"cons_{r['id']}"
+
+                if st.session_state.confirm_del == f"cons_{r['id']}":
+                    st.warning(f"⚠️ Remover o consultor '{r['nome']}'?")
+                    c_del1, c_del2 = st.columns(2)
+                    if c_del1.button("✅ Confirmar", key=f"conf_del_cons_{r['id']}"):
+                        c.execute("DELETE FROM consultores WHERE id = ?", (r['id'],))
+                        conn.commit()
+                        st.session_state.confirm_del = None
+                        st.rerun()
+                    if c_del2.button("❌ Cancelar", key=f"canc_del_cons_{r['id']}"):
+                        st.session_state.confirm_del = None
+                        st.rerun()
