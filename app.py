@@ -50,6 +50,14 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '')
         """)
 
+    # Migração automática config_empresa
+    c.execute("PRAGMA table_info(config_empresa)")
+    cols_config = [col[1] for col in c.fetchall()]
+    if "ie" not in cols_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN ie TEXT DEFAULT '186000158114'")
+    if "logo_path" not in cols_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_path TEXT DEFAULT ''")
+
     # Consultores
     c.execute("""
         CREATE TABLE IF NOT EXISTS consultores (
@@ -114,13 +122,18 @@ def init_db():
 
 init_db()
 
-# Funções Auxiliares
+# Funções Auxiliares protegidas
 def get_config():
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM config_empresa WHERE id = 1", conn)
     if not df.empty:
         d = df.iloc[0].to_dict()
+        d.setdefault('nome_empresa', 'Fábrica de Móveis Laurenti Ltda')
+        d.setdefault('cnpj', '44.331.015/0001-08')
         d.setdefault('ie', '186000158114')
+        d.setdefault('endereco', 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP')
+        d.setdefault('telefone', '(17) 3576-1464')
+        d.setdefault('email', 'contato@laurentimoveis.com.br')
         d.setdefault('logo_path', '')
         return d
     return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': ''}
@@ -129,12 +142,19 @@ def get_consultores():
     conn = get_connection()
     return pd.read_sql_query("SELECT * FROM consultores ORDER BY nome ASC", conn)
 
+# Correção segura para o erro TypeError no max_num
 def get_proxima_proposta():
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT MAX(proposta_num) FROM orcamentos")
-    max_num = c.fetchone()[0]
-    return (max_num + 1) if max_num else 2358
+    c.execute("SELECT proposta_num FROM orcamentos ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    if row and row[0] is not None:
+        try:
+            val = int(row[0])
+            return val + 1
+        except ValueError:
+            return 2358
+    return 2358
 
 def get_ultimas_condicoes():
     conn = get_connection()
@@ -142,7 +162,7 @@ def get_ultimas_condicoes():
     c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes FROM orcamentos ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
     if row:
-        return {'consultor': row[0], 'prazo_entrega': row[1], 'condicoes_pagamento': row[2], 'observacoes': row[3]}
+        return {'consultor': row[0] or 'Sem Consultor', 'prazo_entrega': row[1] or '120 dias após medições finais.', 'condicoes_pagamento': row[2] or '8 PARCELAS', 'observacoes': row[3] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
     return {'consultor': 'Sem Consultor', 'prazo_entrega': '120 dias após medições finais.', 'condicoes_pagamento': '8 PARCELAS', 'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
 
 # Canvas Dinâmico com Numeração de Páginas (Página X de Y)
@@ -208,7 +228,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=11, textColor=colors.HexColor('#222222'))
     body_bold = ParagraphStyle('BodyBold', parent=body_style, fontName='Helvetica-Bold')
     right_bold = ParagraphStyle('RightBold', parent=body_bold, alignment=2)
-    right_normal = ParagraphStyle('RightNormal', parent=body_style, alignment=2)
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
     amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#0F172A'))
 
@@ -249,7 +268,7 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_head)
     story.append(Spacer(1, 10))
 
-    # Tabela de Ambientes e Itens (Destaque para o Ambiente na Linha Superior)
+    # Tabela de Ambientes e Itens
     table_data = [
         [Paragraph("<b>Item</b>", header_title), Paragraph("<b>Valor (R$)</b>", ParagraphStyle('HRight', parent=header_title, alignment=2))]
     ]
@@ -269,13 +288,11 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         tot_liquido += tot_amb
         tot_amb_str = f"R$ {tot_amb:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-        # Requisito 8: Nome do Ambiente na Linha Superior em Destaque
         current_row = len(table_data)
         amb_header_text = f"<b>{ordem_amb}- {nome_amb_upper}</b>"
         table_data.append([Paragraph(amb_header_text, amb_title_style), Paragraph(f"<b>{tot_amb_str}</b>", right_bold)])
         row_styles.append(('BACKGROUND', (0, current_row), (-1, current_row), colors.HexColor('#F1F5F9')))
         
-        # Requisito 3: Descrições dos subitens com quebra de linha automática
         desc_amb_text = f"<i>{amb.get('especificacoes', '')}</i>" if amb.get('especificacoes') else ""
         
         for item in itens_normais:
@@ -306,7 +323,7 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_itens)
     story.append(Spacer(1, 10))
 
-    # Requisito 7: Total Líquido e Total c/ Opcionais destacados no final (lado a lado com as observações)
+    # Totais Destacados no Canto Direito
     tot_com_opc = tot_liquido + tot_opcionais
     tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -387,20 +404,18 @@ if menu == "➕ Novo / Editar Orçamento":
         st.session_state.cli_contato = ""
         st.session_state.cli_tel = ""
         st.session_state.cli_email = ""
+        st.session_state.cli_prop = get_proxima_proposta()
         st.rerun()
 
-    # Requisito 5: Proposta é um número sequencial automático e inalterável
     prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
 
     with st.expander("👤 Dados do Cliente e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            # Requisito 2: Dados do cliente em branco por padrão
             cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa")
             contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável")
             tipo_contato = st.selectbox("Tipo de Contato", ["Residencial", "Comercial", "Arquitetura", "Outros"])
             
-            # Requisito 4: Puxar consultor do último orçamento
             idx_cons_padrao = consultores_opts.index(ultimas_cond['consultor']) if ultimas_cond['consultor'] in consultores_opts else 0
             consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao)
         
@@ -415,7 +430,6 @@ if menu == "➕ Novo / Editar Orçamento":
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
             
-        # Requisito 4: Carregar Prazo, Condições e Observações do último orçamento
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
             prazo_entrega = st.text_input("Prazo de Entrega", value=ultimas_cond['prazo_entrega'])
@@ -459,7 +473,6 @@ if menu == "➕ Novo / Editar Orçamento":
                     amb['especificacoes'] = st.text_input(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{idx_amb}")
                 with col_e3:
                     st.write(" ")
-                    # Requisito 1: Pedir confirmação ao excluir ambiente
                     if st.button("🗑️ Remover Ambiente", key=f"del_amb_btn_{idx_amb}"):
                         st.session_state.confirm_del = f"amb_{idx_amb}"
 
@@ -525,7 +538,6 @@ if menu == "➕ Novo / Editar Orçamento":
 
     col_btn1, col_btn2 = st.columns(2)
     
-    # Requisito 6: Correção definitiva no salvamento de novos orçamentos
     with col_btn1:
         if st.button("💾 Salvar Orçamento no Banco", type="primary", use_container_width=True):
             if not cliente:
@@ -542,12 +554,12 @@ if menu == "➕ Novo / Editar Orçamento":
                     c.execute("""
                         UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?
                         WHERE id=?
-                    """, (prop_num_atual, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
+                    """, (int(prop_num_atual), cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
                 else:
                     c.execute("""
                         INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (prop_num_atual, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
+                    """, (int(prop_num_atual), cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
                     orc_id = c.lastrowid
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
@@ -641,7 +653,6 @@ elif menu == "📋 Orçamentos Salvos":
                     st.success(f"Orçamento #{row['proposta_num']} carregado!")
                     st.rerun()
 
-                # Requisito 1: Confirmação de exclusão nos Orçamentos Salvos
                 if col_a5.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
                     st.session_state.confirm_del = f"orc_{row['id']}"
 
@@ -661,7 +672,7 @@ elif menu == "📋 Orçamentos Salvos":
     else:
         st.info("Nenhum orçamento cadastrado.")
 
-# --- ABA 3: CONFIGURAÇÕES E LOGO ---
+# --- ABA 3: CONFIGURAÇÕES E LOGO (Protegido contra sumiço de campos) ---
 elif menu == "⚙️ Configurações":
     st.subheader("⚙️ Configurações da Empresa e Consultores")
     conn = get_connection()
@@ -670,6 +681,7 @@ elif menu == "⚙️ Configurações":
     st.markdown("#### 🏢 Logo e Dados da Fábrica")
     config = get_config()
     
+    # Upload da Logo sem derrubar as configurações
     uploaded_logo = st.file_uploader("Enviar Logo da Empresa (PNG / JPG)", type=["png", "jpg", "jpeg"])
     if uploaded_logo:
         logo_path = os.path.join("logo_empresa.png")
@@ -678,19 +690,19 @@ elif menu == "⚙️ Configurações":
         c.execute("UPDATE config_empresa SET logo_path = ? WHERE id = 1", (logo_path,))
         conn.commit()
         st.success("Logo atualizada com sucesso!")
-        st.rerun()
 
     logo_actual = config.get('logo_path', '')
     if logo_actual and os.path.exists(logo_actual):
         st.image(logo_actual, width=200, caption="Logo Atual")
 
+    # Formulário das configurações sempre fixo
     with st.form("form_config_empresa"):
-        nome_empresa = st.text_input("Razão Social", value=config.get('nome_empresa', ''))
-        cnpj = st.text_input("CNPJ", value=config.get('cnpj', ''))
-        ie = st.text_input("Inscrição Estadual (IE)", value=config.get('ie', ''))
-        endereco = st.text_input("Endereço Completo", value=config.get('endereco', ''))
-        telefone = st.text_input("Telefone", value=config.get('telefone', ''))
-        email = st.text_input("E-mail", value=config.get('email', ''))
+        nome_empresa = st.text_input("Razão Social", value=config.get('nome_empresa', 'Fábrica de Móveis Laurenti Ltda'))
+        cnpj = st.text_input("CNPJ", value=config.get('cnpj', '44.331.015/0001-08'))
+        ie = st.text_input("Inscrição Estadual (IE)", value=config.get('ie', '186000158114'))
+        endereco = st.text_input("Endereço Completo", value=config.get('endereco', 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP'))
+        telefone = st.text_input("Telefone", value=config.get('telefone', '(17) 3576-1464'))
+        email = st.text_input("E-mail", value=config.get('email', 'contato@laurentimoveis.com.br'))
         
         if st.form_submit_button("💾 Salvar Dados da Empresa"):
             c.execute("""
@@ -699,7 +711,7 @@ elif menu == "⚙️ Configurações":
                 WHERE id = 1
             """, (nome_empresa, cnpj, ie, endereco, telefone, email))
             conn.commit()
-            st.success("Dados salvos!")
+            st.success("Dados da empresa salvos!")
             st.rerun()
 
     st.markdown("---")
@@ -719,7 +731,6 @@ elif menu == "⚙️ Configurações":
             col_cons1, col_cons2 = st.columns([4, 1])
             col_cons1.write(f"👤 **{r['nome']}**")
             
-            # Requisito 1: Trava de confirmação na exclusão de consultores
             if col_cons2.button("🗑️ Excluir", key=f"del_cons_btn_{r['id']}"):
                 st.session_state.confirm_del = f"cons_{r['id']}"
 
