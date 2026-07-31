@@ -85,7 +85,7 @@ def init_db():
         )
     """)
     
-    # Migração automática caso a coluna status não exista em bases antigas
+    # Migração automática caso a coluna status não exista
     c.execute("PRAGMA table_info(orcamentos)")
     colunas = [col[1] for col in c.fetchall()]
     if 'status' not in colunas:
@@ -374,8 +374,19 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-if 'radio_menu' not in st.session_state:
-    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
+# Controle de navegação seguro
+opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
+
+if 'nav_tab' not in st.session_state:
+    st.session_state.nav_tab = opcoes_menu[0]
+
+# Trata requisição de redirecionamento antes de desenhar o sidebar radio
+if 'change_tab_to' in st.session_state and st.session_state.change_tab_to:
+    st.session_state.nav_tab = st.session_state.change_tab_to
+    st.session_state.change_tab_to = None
+
+menu = st.sidebar.radio("Navegação", opcoes_menu, index=opcoes_menu.index(st.session_state.nav_tab), key="radio_menu")
+st.session_state.nav_tab = menu
 
 def recalcular_totais():
     total_liquido = 0.0
@@ -393,9 +404,6 @@ def recalcular_totais():
     return total_liquido, (total_liquido + total_opcionais)
 
 st.title("🏭 Laurenti Móveis — Gestão de Orçamentos")
-
-opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
-menu = st.sidebar.radio("Navegação", opcoes_menu, key="radio_menu")
 
 # --- ABA 1: NOVO / EDITAR ORÇAMENTO ---
 if menu == "➕ Novo / Editar Orçamento":
@@ -648,7 +656,6 @@ elif menu == "📋 Orçamentos Salvos":
     conn = get_connection()
     c = conn.cursor()
     
-    # Filtro rápido por status para pipeline comercial
     filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos", "Em Análise", "Aprovado", "Em Produção", "Perdido"])
     
     if filtro_status == "Todos":
@@ -705,12 +712,12 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
+                    st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # BOTÃO DUPLICAR / CLONAR ORÇAMENTO
+                # BOTÃO CLONAR
                 if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
-                    st.session_state.edit_index = None  # Novo orçamento
+                    st.session_state.edit_index = None
                     st.session_state.cli_prop = get_proxima_proposta()
                     
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
@@ -745,7 +752,7 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
+                    st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
                 # PDF Direto na Lista
