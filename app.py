@@ -15,7 +15,7 @@ from reportlab.lib.units import cm
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. INICIALIZAÇÃO DO BANCO DE DADOS (SQLite)
+# 1. INICIALIZAÇÃO E MIGRAÇÃO DO BANCO DE DADOS (SQLite)
 # -----------------------------------------------------------------------------
 def get_connection():
     conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
@@ -37,7 +37,6 @@ def init_db():
         )
     """)
     
-    # Inserir dados padrão caso não exista
     c.execute("SELECT COUNT(*) FROM config_empresa")
     if c.fetchone()[0] == 0:
         c.execute("""
@@ -53,7 +52,6 @@ def init_db():
         )
     """)
     
-    # Consultores padrão
     c.execute("SELECT COUNT(*) FROM consultores")
     if c.fetchone()[0] == 0:
         c.executemany("INSERT INTO consultores (nome) VALUES (?)", [("Sem Consultor",), ("Vendedor 1",), ("Vendedor 2",)])
@@ -78,6 +76,12 @@ def init_db():
             total_com_opcionais REAL DEFAULT 0
         )
     """)
+
+    # MIGRAÇÃO AUTOMÁTICA: Adicionar a coluna consultor se o banco for antigo
+    c.execute("PRAGMA table_info(orcamentos)")
+    columns = [column[1] for column in c.fetchall()]
+    if "consultor" not in columns:
+        c.execute("ALTER TABLE orcamentos ADD COLUMN consultor TEXT")
 
     # Tabela de Ambientes
     c.execute("""
@@ -324,7 +328,6 @@ if menu == "➕ Novo Orçamento":
             data_atual = st.date_input("Data do Orçamento", value=datetime.now().date())
             
         with col3:
-            # Requisito 3: Padrão em 30 dias
             dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True)
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
@@ -360,7 +363,6 @@ if menu == "➕ Novo Orçamento":
             else:
                 st.error("Digite o nome do ambiente.")
 
-    # Requisito 5: Exibição e Hierarquia Correta (Item / Subitem)
     if st.session_state.ambientes:
         for idx_amb, amb in enumerate(st.session_state.ambientes):
             ordem_amb = idx_amb + 1
@@ -459,7 +461,6 @@ if menu == "➕ Novo Orçamento":
                 conn.commit()
                 st.success(f"✅ Orçamento #{orc_id} salvo com sucesso!")
 
-    # Requisito 6: PDF do Cliente disponível
     with col_btn2:
         if cliente and st.session_state.ambientes:
             cli_info = {
@@ -485,7 +486,7 @@ if menu == "➕ Novo Orçamento":
                 use_container_width=True
             )
 
-# --- ABA 2: EDITIONS E ORÇAMENTOS SALVOS ---
+# --- ABA 2: EDITAR E ORÇAMENTOS SALVOS ---
 elif menu == "📋 Orçamentos Salvos":
     st.subheader("Orçamentos Salvos no Banco")
     conn = get_connection()
@@ -494,7 +495,6 @@ elif menu == "📋 Orçamentos Salvos":
     if not df_orc.empty:
         st.dataframe(df_orc, use_container_width=True)
         
-        # Requisito 1: Selecionar e Editar Orçamento Salvo
         st.markdown("---")
         st.subheader("✏️ Editar ou Reemitir Orçamento Salvo")
         orc_id_select = st.number_input("Digite o ID do Orçamento que deseja abrir:", min_value=1, step=1)
@@ -517,7 +517,6 @@ elif menu == "📋 Orçamentos Salvos":
             
             st.markdown(f"### Editando Orçamento #{o[0]} — Cliente: {o[1]}")
             
-            # Carregar Ambientes e Itens do Banco
             ambs_db = []
             c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (o[0],))
             for amb_row in c.fetchall():
@@ -568,7 +567,6 @@ elif menu == "⚙️ Configurações":
     conn = get_connection()
     c = conn.cursor()
     
-    # Requisito 2: Edição dos Dados da Empresa
     st.markdown("#### 🏢 Dados da Laurenti Móveis")
     config = get_config()
     
@@ -592,7 +590,6 @@ elif menu == "⚙️ Configurações":
 
     st.markdown("---")
     
-    # Requisito 4: Gestão de Consultores
     st.markdown("#### 👤 Cadastrar e Gerenciar Consultores")
     
     col_c1, col_c2 = st.columns(2)
