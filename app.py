@@ -50,14 +50,6 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '')
         """)
 
-    # Migração automática config_empresa
-    c.execute("PRAGMA table_info(config_empresa)")
-    cols_config = [col[1] for col in c.fetchall()]
-    if "ie" not in cols_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN ie TEXT DEFAULT '186000158114'")
-    if "logo_path" not in cols_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_path TEXT DEFAULT ''")
-
     # Consultores
     c.execute("""
         CREATE TABLE IF NOT EXISTS consultores (
@@ -142,7 +134,6 @@ def get_consultores():
     conn = get_connection()
     return pd.read_sql_query("SELECT * FROM consultores ORDER BY nome ASC", conn)
 
-# Correção segura para o erro TypeError no max_num
 def get_proxima_proposta():
     conn = get_connection()
     c = conn.cursor()
@@ -231,7 +222,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
     amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#0F172A'))
 
-    # Cabeçalho
     col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
     if logo_p and os.path.exists(logo_p):
@@ -268,7 +258,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_head)
     story.append(Spacer(1, 10))
 
-    # Tabela de Ambientes e Itens
     table_data = [
         [Paragraph("<b>Item</b>", header_title), Paragraph("<b>Valor (R$)</b>", ParagraphStyle('HRight', parent=header_title, alignment=2))]
     ]
@@ -323,7 +312,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_itens)
     story.append(Spacer(1, 10))
 
-    # Totais Destacados no Canto Direito
     tot_com_opc = tot_liquido + tot_opcionais
     tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -370,6 +358,9 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = "➕ Novo / Editar Orçamento"
+
 def recalcular_totais():
     total_liquido = 0.0
     total_opcionais = 0.0
@@ -387,7 +378,12 @@ def recalcular_totais():
 
 st.title("🏭 Laurenti Móveis — Gestão de Orçamentos")
 
-menu = st.sidebar.radio("Navegação", ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"])
+menu = st.sidebar.radio("Navegação", ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"], key="main_menu")
+
+# Sync caso botão de edição peça para mudar a aba
+if 'navigate_to' in st.session_state and st.session_state.navigate_to:
+    menu = st.session_state.navigate_to
+    st.session_state.navigate_to = None
 
 # --- ABA 1: NOVO / EDITAR ORÇAMENTO ---
 if menu == "➕ Novo / Editar Orçamento":
@@ -404,6 +400,11 @@ if menu == "➕ Novo / Editar Orçamento":
         st.session_state.cli_contato = ""
         st.session_state.cli_tel = ""
         st.session_state.cli_email = ""
+        st.session_state.cli_tipo = "Residencial"
+        st.session_state.cli_consultor = ultimas_cond['consultor']
+        st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
+        st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
+        st.session_state.cli_obs = ultimas_cond['observacoes']
         st.session_state.cli_prop = get_proxima_proposta()
         st.rerun()
 
@@ -414,9 +415,13 @@ if menu == "➕ Novo / Editar Orçamento":
         with col1:
             cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa")
             contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável")
-            tipo_contato = st.selectbox("Tipo de Contato", ["Residencial", "Comercial", "Arquitetura", "Outros"])
             
-            idx_cons_padrao = consultores_opts.index(ultimas_cond['consultor']) if ultimas_cond['consultor'] in consultores_opts else 0
+            tipo_opts = ["Residencial", "Comercial", "Arquitetura", "Outros"]
+            idx_tipo = tipo_opts.index(st.session_state.get('cli_tipo', 'Residencial')) if st.session_state.get('cli_tipo') in tipo_opts else 0
+            tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo)
+            
+            cons_val = st.session_state.get('cli_consultor', ultimas_cond['consultor'])
+            idx_cons_padrao = consultores_opts.index(cons_val) if cons_val in consultores_opts else 0
             consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao)
         
         with col2:
@@ -432,11 +437,11 @@ if menu == "➕ Novo / Editar Orçamento":
             
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
-            prazo_entrega = st.text_input("Prazo de Entrega", value=ultimas_cond['prazo_entrega'])
+            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']))
         with col_cond2:
-            condicoes_pagamento = st.text_input("Condições de Pagamento", value=ultimas_cond['condicoes_pagamento'])
+            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']))
             
-        observacoes = st.text_area("Observações Gerais", value=ultimas_cond['observacoes'])
+        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']))
 
     st.markdown("---")
     st.subheader("🛋️ Ambientes e Subitens")
@@ -620,6 +625,7 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
+                # BOTÃO EDITAR: Carrega absolutamente TODOS os dados e navega sozinho!
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     st.session_state.edit_index = row['id']
                     
@@ -629,8 +635,13 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_prop = o[1]
                     st.session_state.cli_nome = o[2]
                     st.session_state.cli_contato = o[3]
+                    st.session_state.cli_tipo = o[4]
                     st.session_state.cli_tel = o[5]
                     st.session_state.cli_email = o[6]
+                    st.session_state.cli_consultor = o[7]
+                    st.session_state.cli_prazo = o[11]
+                    st.session_state.cli_cond = o[12]
+                    st.session_state.cli_obs = o[13]
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -650,7 +661,7 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.success(f"Orçamento #{row['proposta_num']} carregado!")
+                    st.session_state.navigate_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
                 if col_a5.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
@@ -672,7 +683,7 @@ elif menu == "📋 Orçamentos Salvos":
     else:
         st.info("Nenhum orçamento cadastrado.")
 
-# --- ABA 3: CONFIGURAÇÕES E LOGO (Protegido contra sumiço de campos) ---
+# --- ABA 3: CONFIGURAÇÕES E LOGO ---
 elif menu == "⚙️ Configurações":
     st.subheader("⚙️ Configurações da Empresa e Consultores")
     conn = get_connection()
@@ -681,7 +692,6 @@ elif menu == "⚙️ Configurações":
     st.markdown("#### 🏢 Logo e Dados da Fábrica")
     config = get_config()
     
-    # Upload da Logo sem derrubar as configurações
     uploaded_logo = st.file_uploader("Enviar Logo da Empresa (PNG / JPG)", type=["png", "jpg", "jpeg"])
     if uploaded_logo:
         logo_path = os.path.join("logo_empresa.png")
@@ -695,7 +705,6 @@ elif menu == "⚙️ Configurações":
     if logo_actual and os.path.exists(logo_actual):
         st.image(logo_actual, width=200, caption="Logo Atual")
 
-    # Formulário das configurações sempre fixo
     with st.form("form_config_empresa"):
         nome_empresa = st.text_input("Razão Social", value=config.get('nome_empresa', 'Fábrica de Móveis Laurenti Ltda'))
         cnpj = st.text_input("CNPJ", value=config.get('cnpj', '44.331.015/0001-08'))
