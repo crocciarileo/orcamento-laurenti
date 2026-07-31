@@ -452,70 +452,124 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     buffer.seek(0)
     return buffer
 
+def set_cell_background(cell, fill_hex):
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill_hex}"/>')
+    tcPr.append(shd)
+
+def set_cell_margins(cell, top=100, bottom=100, left=150, right=150):
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = parse_xml(f'<w:tcMar {nsdecls("w")}><w:top w:w="{top}" w:type="dxa"/><w:bottom w:w="{bottom}" w:type="dxa"/><w:left w:w="{left}" w:type="dxa"/><w:right w:w="{right}" w:type="dxa"/></w:tcMar>')
+    tcPr.append(tcMar)
+
+def set_table_borders(table, color="CBD5E1"):
+    tblPr = table._tbl.tblPr
+    borders = parse_xml(f'''
+        <w:tblBorders {nsdecls("w")}>
+            <w:top w:val="single" w:sz="4" w:space="0" w:color="{color}"/>
+            <w:bottom w:val="single" w:sz="4" w:space="0" w:color="{color}"/>
+            <w:left w:val="single" w:sz="4" w:space="0" w:color="{color}"/>
+            <w:right w:val="single" w:sz="4" w:space="0" w:color="{color}"/>
+            <w:insideH w:val="single" w:sz="4" w:space="0" w:color="{color}"/>
+            <w:insideV w:val="none"/>
+        </w:tblBorders>
+    ''')
+    tblPr.append(borders)
+
 def gerar_word_orcamento(cliente_info, ambientes_list):
     config = get_config()
     doc = Document()
     
-    # Define margens de 1.2 cm
-    sections = doc.sections
-    for section in sections:
+    for section in doc.sections:
         section.top_margin = Inches(0.47)
         section.bottom_margin = Inches(0.47)
         section.left_margin = Inches(0.47)
         section.right_margin = Inches(0.47)
 
-    # Tabela do Cabeçalho
+    # 1. CABEÇALHO
     t_head = doc.add_table(rows=1, cols=3)
     t_head.alignment = WD_TABLE_ALIGNMENT.CENTER
     t_head.autofit = False
+    set_table_borders(t_head, color="CBD5E1")
     
-    widths = [Inches(1.8), Inches(3.8), Inches(1.8)]
-    for i, col in enumerate(t_head.columns):
-        for cell in col.cells:
+    logo_largura_cm = float(config.get('logo_largura', 5.0))
+    w_logo = max(logo_largura_cm / 2.54, 1.8)
+    
+    widths = [Inches(w_logo), Inches(5.5 - w_logo), Inches(1.8)]
+    for row in t_head.rows:
+        for i, cell in enumerate(row.cells):
             cell.width = widths[i]
-            
+            set_cell_margins(cell, top=120, bottom=120, left=120, right=120)
+
     cell_logo, cell_cli, cell_prop = t_head.rows[0].cells
-    
+    set_cell_background(cell_prop, "F8FAFC")
+
+    p_logo = cell_logo.paragraphs[0]
+    p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
     logo_p = config.get('logo_path', '')
     if logo_p and os.path.exists(logo_p):
         try:
-            p_img = cell_logo.paragraphs[0]
-            p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p_img.add_run().add_picture(logo_p, width=Inches(1.5))
+            p_logo.add_run().add_picture(logo_p, width=Inches(logo_largura_cm / 2.54))
         except Exception:
-            cell_logo.paragraphs[0].text = config.get('nome_empresa', 'LAURENTI MÓVEIS')
+            p_logo.add_run("LAURENTI MÓVEIS").bold = True
     else:
-        cell_logo.paragraphs[0].text = config.get('nome_empresa', 'LAURENTI MÓVEIS')
-        
+        p_logo.add_run("LAURENTI MÓVEIS").bold = True
+
     p_cli = cell_cli.paragraphs[0]
     p_cli.paragraph_format.line_spacing = 1.15
-    run_cli = p_cli.add_run(f"Cliente: {cliente_info.get('cliente', '')}\n")
-    run_cli.bold = True
-    p_cli.add_run(f"Contato: {cliente_info.get('contato', '')}\nConsultor: {cliente_info.get('consultor', '')}\nTipo: {cliente_info.get('tipo_contato', '')}\nFone: {cliente_info.get('telefone', '')}\nE-mail: {cliente_info.get('email', '')}")
+    
+    def add_line(p, label, value):
+        r1 = p.add_run(f"{label}: ")
+        r1.bold = True
+        p.add_run(f"{value}\n")
+
+    add_line(p_cli, "Cliente", cliente_info.get('cliente', ''))
+    add_line(p_cli, "Contato", cliente_info.get('contato', ''))
+    add_line(p_cli, "Consultor", cliente_info.get('consultor', ''))
+    add_line(p_cli, "Tipo de Contato", cliente_info.get('tipo_contato', ''))
+    add_line(p_cli, "Telefone", cliente_info.get('telefone', ''))
+    
+    r_em_lbl = p_cli.add_run("E-mail: ")
+    r_em_lbl.bold = True
+    p_cli.add_run(f"{cliente_info.get('email', '')}")
 
     p_prop = cell_prop.paragraphs[0]
-    p_prop.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     p_num = cliente_info.get('proposta_num', 1)
     prop_str = f"{int(p_num):04d}" if str(p_num).isdigit() else str(p_num)
-    p_prop.add_run(f"Proposta: {prop_str}\n\nData: {cliente_info.get('data', '')}\n\nValidade: {cliente_info.get('validade', '')}")
+    
+    add_line(p_prop, "Proposta", prop_str)
+    p_prop.add_run("\n")
+    add_line(p_prop, "Data", cliente_info.get('data', ''))
+    p_prop.add_run("\n")
+    
+    r_val_lbl = p_prop.add_run("Validade: ")
+    r_val_lbl.bold = True
+    p_prop.add_run(f"{cliente_info.get('validade', '')}")
 
-    doc.add_paragraph()
+    doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
-    # Tabela de Ambientes e Itens
-    tot_liquido = 0.0
-    tot_opcionais = 0.0
-
+    # 2. TABELA DE ITENS
     t_itens = doc.add_table(rows=1, cols=2)
     t_itens.alignment = WD_TABLE_ALIGNMENT.CENTER
     t_itens.autofit = False
-    
-    t_itens.columns[0].width = Inches(5.8)
+    set_table_borders(t_itens, color="CBD5E1")
+
+    t_itens.columns[0].width = Inches(5.7)
     t_itens.columns[1].width = Inches(1.6)
 
     hdr_cells = t_itens.rows[0].cells
-    hdr_cells[0].text = "Item / Descrição"
-    hdr_cells[1].text = "Valor (R$)"
-    hdr_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    set_cell_background(hdr_cells[0], "E2E8F0")
+    set_cell_background(hdr_cells[1], "E2E8F0")
+    set_cell_margins(hdr_cells[0], top=100, bottom=100, left=120, right=120)
+    set_cell_margins(hdr_cells[1], top=100, bottom=100, left=120, right=120)
+
+    hdr_cells[0].paragraphs[0].add_run("Item").bold = True
+    p_h_val = hdr_cells[1].paragraphs[0]
+    p_h_val.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_h_val.add_run("Valor (R$)").bold = True
+
+    tot_liquido = 0.0
+    tot_opcionais = 0.0
 
     for idx_a, amb in enumerate(ambientes_list):
         ordem_amb = idx_a + 1
@@ -526,9 +580,13 @@ def gerar_word_orcamento(cliente_info, ambientes_list):
         tot_liquido += tot_amb
         tot_amb_str = f"R$ {tot_amb:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-        # Linha Título Ambiente
         row_amb = t_itens.add_row()
         c_tit, c_val = row_amb.cells
+        set_cell_background(c_tit, "F1F5F9")
+        set_cell_background(c_val, "F1F5F9")
+        set_cell_margins(c_tit, top=100, bottom=100, left=120, right=120)
+        set_cell_margins(c_val, top=100, bottom=100, left=120, right=120)
+
         p_tit = c_tit.paragraphs[0]
         r_tit = p_tit.add_run(f"{ordem_amb}- {amb['nome'].upper()}")
         r_tit.bold = True
@@ -538,10 +596,12 @@ def gerar_word_orcamento(cliente_info, ambientes_list):
         r_val = p_val.add_run(tot_amb_str)
         r_val.bold = True
 
-        # Linha Detalhes Subitens
         row_desc = t_itens.add_row()
-        c_desc, _ = row_desc.cells
+        c_desc, c_empty = row_desc.cells
+        set_cell_margins(c_desc, top=100, bottom=100, left=120, right=120)
+
         p_desc = c_desc.paragraphs[0]
+        p_desc.paragraph_format.line_spacing = 1.15
         
         if amb.get('especificacoes'):
             r_esp = p_desc.add_run(f"{amb['especificacoes']}\n")
@@ -552,32 +612,69 @@ def gerar_word_orcamento(cliente_info, ambientes_list):
             p_desc.add_run(f"- {item['descricao']} - R$ {val_f}\n")
 
         if itens_opcionais:
-            p_desc.add_run("\n• Acessórios opcionais a serem acrescidos:\n")
+            p_desc.add_run("\n• Acessórios opcionais a serem acrescidos:\n").bold = True
             for item in itens_opcionais:
                 val_opc = float(item['valor'])
                 tot_opcionais += val_opc
                 val_f = f"{val_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 p_desc.add_run(f"- {item['descricao']}, acréscimo - R$ {val_f}\n")
 
-    doc.add_paragraph()
+    doc.add_paragraph().paragraph_format.space_after = Pt(6)
 
-    # Totais
+    # 3. TOTAIS
     tot_com_opc = tot_liquido + tot_opcionais
     tot_liq_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    p_tot = doc.add_paragraph()
-    p_tot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p_tot.add_run(f"Total Líquido: {tot_liq_str}\n").bold = True
-    p_tot.add_run(f"Total c/ Opcionais: {tot_opc_str}").bold = True
+    t_tot = doc.add_table(rows=1, cols=2)
+    t_tot.alignment = WD_TABLE_ALIGNMENT.CENTER
+    t_tot.autofit = False
+    
+    t_tot.columns[0].width = Inches(4.3)
+    t_tot.columns[1].width = Inches(3.0)
 
-    doc.add_paragraph()
+    cell_blank, cell_box = t_tot.rows[0].cells
+    set_cell_background(cell_box, "F1F5F9")
+    set_cell_margins(cell_box, top=120, bottom=120, left=120, right=120)
+    
+    p_box = cell_box.paragraphs[0]
+    p_box.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    
+    r_tl1 = p_box.add_run("Total Líquido:  ")
+    r_tl1.font.size = Pt(9)
+    r_tl1.bold = True
+    r_tl2 = p_box.add_run(f"{tot_liq_str}\n")
+    r_tl2.font.size = Pt(11)
+    r_tl2.bold = True
+    
+    r_to1 = p_box.add_run("Total c/ Opcionais:  ")
+    r_to1.font.size = Pt(8)
+    r_to2 = p_box.add_run(f"{tot_opc_str}")
+    r_to2.font.size = Pt(10)
+    r_to2.bold = True
 
-    # Observações e Condições
-    p_cond = doc.add_paragraph()
-    p_cond.add_run(f"Prazo de Entrega: {cliente_info.get('prazo_entrega', '')}\n").bold = True
-    p_cond.add_run(f"Condição de Pagamento: {cliente_info.get('condicoes_pagamento', '')}\n").bold = True
-    p_cond.add_run(f"Observações: {cliente_info.get('observacoes', '')}")
+    doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
+    # 4. OBSERVAÇÕES
+    t_cond = doc.add_table(rows=1, cols=1)
+    t_cond.alignment = WD_TABLE_ALIGNMENT.CENTER
+    t_cond.autofit = False
+    t_cond.columns[0].width = Inches(7.3)
+    
+    set_table_borders(t_cond, color="CBD5E1")
+    cell_cond = t_cond.rows[0].cells[0]
+    set_cell_background(cell_cond, "F8FAFC")
+    set_cell_margins(cell_cond, top=120, bottom=120, left=120, right=120)
+
+    p_cond = cell_cond.paragraphs[0]
+    p_cond.paragraph_format.line_spacing = 1.15
+    
+    add_line(p_cond, "Prazo de Entrega", cliente_info.get('prazo_entrega', ''))
+    add_line(p_cond, "Condição de Pagamento", cliente_info.get('condicoes_pagamento', ''))
+    
+    r_obs_lbl = p_cond.add_run("Observações: ")
+    r_obs_lbl.bold = True
+    p_cond.add_run(f"{cliente_info.get('observacoes', '')}")
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -591,7 +688,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
     
     ws.views.sheetView[0].showGridLines = True
 
-    # Estilos
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     font_bold = Font(name="Calibri", size=11, bold=True)
     font_title = Font(name="Calibri", size=14, bold=True, color="1E293B")
@@ -605,7 +701,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
     p_num = cliente_info.get('proposta_num', 1)
     prop_str = f"{int(p_num):04d}" if str(p_num).isdigit() else str(p_num)
 
-    # Cabeçalho Empresa e Cliente
     ws["A1"] = config.get('nome_empresa', 'LAURENTI MÓVEIS')
     ws["A1"].font = font_title
     
@@ -641,7 +736,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
         tot_amb = sum(float(i['valor']) for i in itens_normais)
         tot_liquido += tot_amb
 
-        # Linha Ambiente
         ws.cell(row=row_idx, column=1, value=f"{ordem_amb}- {amb['nome'].upper()}").font = font_bold
         ws.cell(row=row_idx, column=1).fill = fill_amb
         ws.cell(row=row_idx, column=2, value="Ambiente").font = font_bold
@@ -677,7 +771,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
         
         row_idx += 1
 
-    # Totais
     ws.cell(row=row_idx, column=2, value="Total Líquido:").font = font_bold
     c_tl = ws.cell(row=row_idx, column=3, value=tot_liquido)
     c_tl.font = font_bold
@@ -692,7 +785,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
     c_to.alignment = align_right
     row_idx += 2
 
-    # Condições
     ws.cell(row=row_idx, column=1, value=f"Prazo de Entrega: {cliente_info.get('prazo_entrega', '')}").font = font_bold
     row_idx += 1
     ws.cell(row=row_idx, column=1, value=f"Condição de Pagamento: {cliente_info.get('condicoes_pagamento', '')}").font = font_bold
@@ -775,7 +867,6 @@ def reseta_formulario_limpo():
     st.session_state.expand_ambientes = True
     st.session_state.form_version += 1
 
-# Botão Sair na Barra Lateral
 st.sidebar.markdown("### 👤 Usuário Autenticado")
 if st.sidebar.button("🚪 Sair / Bloquear Sistema", use_container_width=True):
     st.session_state.autenticado = False
@@ -1037,7 +1128,6 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn.commit()
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso!")
 
-    # Opções de Exportação em PDF, Word e Excel
     with col_btn2:
         cli_info = {
             'proposta_num': prop_formatted,
@@ -1092,14 +1182,12 @@ elif menu == "📋 Orçamentos Salvos":
     
     status_list = get_status_list()
     
-    # Filtros e Barra de Pesquisa
     c_f1, c_f2 = st.columns([1, 2])
     with c_f1:
         filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos"] + status_list)
     with c_f2:
         termo_busca = st.text_input("🔍 Pesquisar por Cliente, Nº Proposta ou Consultor", placeholder="Digite o nome, número ou consultor...").strip()
 
-    # Query dinâmica com filtro e busca
     query = "SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos WHERE 1=1"
     params = []
 
@@ -1128,7 +1216,6 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # Editar
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -1173,7 +1260,6 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # Clonar
                 if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -1218,7 +1304,6 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # Puxa dados salvos para exportação direta na lista
                 c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                 o_saved = dict(c.fetchone())
                 ambs_saved = []
@@ -1321,7 +1406,6 @@ elif menu == "⚙️ Configurações":
 
     st.markdown("---")
     
-    # Alterar Senha
     st.markdown("#### 🔑 Alterar Senha do Sistema")
     with st.form("form_alterar_senha"):
         col_p1, col_p2 = st.columns(2)
@@ -1343,7 +1427,6 @@ elif menu == "⚙️ Configurações":
     st.markdown("---")
     col_cfg1, col_cfg2 = st.columns(2)
     
-    # Gestão de Status Comercial
     with col_cfg1:
         st.markdown("#### 🏷️ Gestão de Status Comercial")
         
@@ -1393,7 +1476,6 @@ elif menu == "⚙️ Configurações":
                     st.session_state.confirm_del = None
                     st.rerun()
 
-    # Gestão de Consultores
     with col_cfg2:
         st.markdown("#### 👤 Gestão de Consultores")
         
