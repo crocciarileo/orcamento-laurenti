@@ -144,8 +144,8 @@ def get_proxima_proposta():
             val = int(row[0])
             return val + 1
         except ValueError:
-            return 2358
-    return 2358
+            return 1
+    return 1
 
 def get_ultimas_condicoes():
     conn = get_connection()
@@ -198,7 +198,7 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 # -----------------------------------------------------------------------------
-# 2. GERADOR DE PDF
+# 2. GERADOR DE PDF FIEL AO MODELO
 # -----------------------------------------------------------------------------
 def gerar_pdf_orcamento(cliente_info, ambientes_list):
     config = get_config()
@@ -216,17 +216,26 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story = []
     styles = getSampleStyleSheet()
     
-    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=11, textColor=colors.HexColor('#222222'))
+    # Entrelinha aumentada (leading=13) para leitura mais confortável
+    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8.5, leading=13, textColor=colors.HexColor('#222222'))
     body_bold = ParagraphStyle('BodyBold', parent=body_style, fontName='Helvetica-Bold')
     right_bold = ParagraphStyle('RightBold', parent=body_bold, alignment=2)
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
-    amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#0F172A'))
+    amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9.5, textColor=colors.HexColor('#0F172A'))
 
+    # Cálculo proporcional da logo usando PIL
     col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
     if logo_p and os.path.exists(logo_p):
         try:
-            col_logo = RLImage(logo_p, width=3.8*cm, height=1.4*cm)
+            with Image.open(logo_p) as img:
+                w_orig, h_orig = img.size
+                max_w = 4.0 * cm
+                max_h = 1.5 * cm
+                ratio = min(max_w / w_orig, max_h / h_orig)
+                final_w = w_orig * ratio
+                final_h = h_orig * ratio
+                col_logo = RLImage(logo_p, width=final_w, height=final_h)
         except Exception:
             pass
 
@@ -238,21 +247,23 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     <b>Telefone:</b> {cliente_info.get('telefone', '')} &nbsp;&nbsp;&nbsp; <b>E-mail:</b> {cliente_info.get('email', '')}
     """
     
-    prop_num = cliente_info.get('proposta_num', '2358')
+    p_num = cliente_info.get('proposta_num', 1)
+    prop_num_str = f"{int(p_num):04d}" if str(p_num).isdigit() else str(p_num)
+    
     prop_text = f"""
-    <b>Proposta:</b> {prop_num}<br/><br/>
+    <b>Proposta:</b> {prop_num_str}<br/><br/>
     <b>Data:</b> {cliente_info.get('data', '')}<br/><br/>
     <b>Validade:</b> {cliente_info.get('validade', '')}
     """
     
     t_head = Table([
         [col_logo, Paragraph(cli_text, body_style), Paragraph(prop_text, body_style)]
-    ], colWidths=[4*cm, 10.2*cm, 4.4*cm])
+    ], colWidths=[4.2*cm, 10.0*cm, 4.4*cm])
     
     t_head.setStyle(TableStyle([
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('PADDING', (0,0), (-1,-1), 5),
+        ('PADDING', (0,0), (-1,-1), 6),
         ('BACKGROUND', (2,0), (2,0), colors.HexColor('#F8FAFC')),
     ]))
     story.append(t_head)
@@ -304,7 +315,7 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#E2E8F0')),
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#94A3B8')),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-        ('PADDING', (0,0), (-1,-1), 6),
+        ('PADDING', (0,0), (-1,-1), 7),
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
     ] + row_styles
     
@@ -358,9 +369,8 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-# Sincronização estrita de aba para evitar que a página resete ao digitar
-if 'nav_selection' not in st.session_state:
-    st.session_state.nav_selection = "➕ Novo / Editar Orçamento"
+if 'radio_menu' not in st.session_state:
+    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
 
 def recalcular_totais():
     total_liquido = 0.0
@@ -379,12 +389,8 @@ def recalcular_totais():
 
 st.title("🏭 Laurenti Móveis — Gestão de Orçamentos")
 
-# Menu de Navegação na Barra Lateral
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
-menu = st.sidebar.radio("Navegação", opcoes_menu, index=opcoes_menu.index(st.session_state.nav_selection), key="radio_menu")
-
-# Atualiza a seleção do usuário
-st.session_state.nav_selection = menu
+menu = st.sidebar.radio("Navegação", opcoes_menu, key="radio_menu")
 
 # --- ABA 1: NOVO / EDITAR ORÇAMENTO ---
 if menu == "➕ Novo / Editar Orçamento":
@@ -400,7 +406,7 @@ if menu == "➕ Novo / Editar Orçamento":
         st.session_state.cli_nome = ""
         st.session_state.cli_contato = ""
         st.session_state.cli_tel = ""
-        st.session_state.cli_email = ""
+        st.session_state.cli_email = "" # Reseta email limpo
         st.session_state.cli_tipo = "Residencial"
         st.session_state.cli_consultor = ultimas_cond['consultor']
         st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
@@ -410,6 +416,7 @@ if menu == "➕ Novo / Editar Orçamento":
         st.rerun()
 
     prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
+    prop_formatted = f"{int(prop_num_atual):04d}" if str(prop_num_atual).isdigit() else str(prop_num_atual)
 
     with st.expander("👤 Dados do Cliente e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
@@ -440,7 +447,7 @@ if menu == "➕ Novo / Editar Orçamento":
             data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key="in_cli_data")
             
         with col3:
-            st.text_input("Proposta Nº (Automático)", value=str(prop_num_atual), disabled=True)
+            st.text_input("Proposta Nº (Automático)", value=prop_formatted, disabled=True)
             dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True, key="in_cli_val")
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
@@ -566,18 +573,21 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn = get_connection()
                 c = conn.cursor()
                 
+                # Trata proposta_num de forma limpa como int
+                num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
+
                 if st.session_state.edit_index:
                     orc_id = st.session_state.edit_index
                     c.execute("DELETE FROM ambientes WHERE orcamento_id = ?", (orc_id,))
                     c.execute("""
                         UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?
                         WHERE id=?
-                    """, (int(prop_num_atual), cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
+                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
                 else:
                     c.execute("""
                         INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (int(prop_num_atual), cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
+                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
                     orc_id = c.lastrowid
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
@@ -594,12 +604,12 @@ if menu == "➕ Novo / Editar Orçamento":
                         """, (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0))
                 
                 conn.commit()
-                st.success(f"✅ Orçamento Proposta Nº {prop_num_atual} salvo com sucesso!")
+                st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso!")
 
-    # Requisito 2: Botão de Exportação em PDF Garantido e Visível
+    # Exportação PDF garantida
     with col_btn2:
         cli_info = {
-            'proposta_num': prop_num_atual,
+            'proposta_num': prop_formatted,
             'cliente': cliente if cliente else 'CLIENTE NÃO INFORMADO',
             'contato': contato,
             'tipo_contato': tipo_contato,
@@ -617,7 +627,7 @@ if menu == "➕ Novo / Editar Orçamento":
         st.download_button(
             label="📄 Exportar Orçamento em PDF",
             data=pdf_bytes,
-            file_name=f"Orcamento_{prop_num_atual}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.pdf",
+            file_name=f"Orcamento_{prop_formatted}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.pdf",
             mime="application/pdf",
             use_container_width=True
         )
@@ -634,11 +644,13 @@ elif menu == "📋 Orçamentos Salvos":
         for idx, row in df_orc.iterrows():
             with st.container():
                 col_a1, col_a2, col_a3, col_a4, col_a5, col_a6 = st.columns([1.5, 2.5, 1.8, 1.2, 1.2, 1.2])
-                col_a1.write(f"**Proposta: #{row['proposta_num']}**")
+                
+                p_fmt = f"{int(row['proposta_num']):04d}" if str(row['proposta_num']).isdigit() else str(row['proposta_num'])
+                col_a1.write(f"**Proposta: #{p_fmt}**")
                 col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # Botão Editar (Carrega todos os dados e sincroniza a navegação)
+                # BOTÃO EDITAR: Puxa todos os dados e joga para o formulário
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     st.session_state.edit_index = row['id']
                     
@@ -674,10 +686,10 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.session_state.nav_selection = "➕ Novo / Editar Orçamento"
+                    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # Requisito 2: Botão de PDF direto nos Orçamentos Salvos
+                # PDF Direto na Lista
                 c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                 o_saved = c.fetchone()
                 ambs_saved = []
@@ -690,7 +702,7 @@ elif menu == "📋 Orçamentos Salvos":
                     ambs_saved.append({'nome': amb_row[1], 'especificacoes': amb_row[2], 'total_ambiente': amb_row[3], 'itens': itens_saved})
 
                 cli_saved_info = {
-                    'proposta_num': o_saved[1], 'cliente': o_saved[2], 'contato': o_saved[3], 'tipo_contato': o_saved[4],
+                    'proposta_num': p_fmt, 'cliente': o_saved[2], 'contato': o_saved[3], 'tipo_contato': o_saved[4],
                     'telefone': o_saved[5], 'email': o_saved[6], 'consultor': o_saved[7], 'data': o_saved[8],
                     'dias_validade': o_saved[9], 'validade': o_saved[10], 'prazo_entrega': o_saved[11],
                     'condicoes_pagamento': o_saved[12], 'observacoes': o_saved[13]
@@ -700,7 +712,7 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a5.download_button(
                     label="📄 PDF",
                     data=pdf_saved_bytes,
-                    file_name=f"Orcamento_{o_saved[1]}_{o_saved[2].replace(' ', '_')}.pdf",
+                    file_name=f"Orcamento_{p_fmt}_{o_saved[2].replace(' ', '_')}.pdf",
                     mime="application/pdf",
                     key=f"btn_pdf_orc_{row['id']}"
                 )
@@ -709,7 +721,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.confirm_del = f"orc_{row['id']}"
 
                 if st.session_state.confirm_del == f"orc_{row['id']}":
-                    st.warning(f"⚠️ Confirma a exclusão permanente do Orçamento Proposta #{row['proposta_num']}?")
+                    st.warning(f"⚠️ Confirma a exclusão permanente do Orçamento Proposta #{p_fmt}?")
                     c_del1, c_del2 = st.columns(2)
                     if c_del1.button("✅ Confirmar", key=f"conf_del_orc_{row['id']}"):
                         c.execute("DELETE FROM orcamentos WHERE id = ?", (row['id'],))
