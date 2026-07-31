@@ -6,10 +6,10 @@ import io
 import os
 from PIL import Image
 
-# ReportLab para geração do PDF fiel ao modelo da Laurenti Móveis
+# ReportLab para PDF institucional Laurenti Móveis
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
@@ -18,7 +18,7 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. INICIALIZAÇÃO E MIGRAÇÃO AUTOMÁTICA DO BANCO DE DADOS (SQLite)
+# 1. BANCO DE DADOS E MIGRAÇÕES (SQLite)
 # -----------------------------------------------------------------------------
 def get_connection():
     return sqlite3.connect('orcamentos.db', check_same_thread=False)
@@ -27,7 +27,7 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
     
-    # Tabela de Configurações da Empresa
+    # Configurações da Empresa
     c.execute("""
         CREATE TABLE IF NOT EXISTS config_empresa (
             id INTEGER PRIMARY KEY,
@@ -50,15 +50,7 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '')
         """)
 
-    # MIGRAÇÃO AUTOMÁTICA: config_empresa
-    c.execute("PRAGMA table_info(config_empresa)")
-    cols_config = [col[1] for col in c.fetchall()]
-    if "ie" not in cols_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN ie TEXT DEFAULT '186000158114'")
-    if "logo_path" not in cols_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_path TEXT DEFAULT ''")
-
-    # Tabela de Consultores
+    # Consultores
     c.execute("""
         CREATE TABLE IF NOT EXISTS consultores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,16 +60,13 @@ def init_db():
     
     c.execute("SELECT COUNT(*) FROM consultores")
     if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO consultores (nome) VALUES (?)", [
-            ("KATIA LUCIA LOURENCO",), 
-            ("Sem Consultor",)
-        ])
+        c.executemany("INSERT INTO consultores (nome) VALUES (?)", [("KATIA LUCIA LOURENCO",), ("Sem Consultor",)])
 
-    # Tabela de Orçamentos
+    # Orçamentos
     c.execute("""
         CREATE TABLE IF NOT EXISTS orcamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            proposta_num TEXT,
+            proposta_num INTEGER,
             cliente TEXT NOT NULL,
             contato TEXT,
             tipo_contato TEXT,
@@ -95,15 +84,7 @@ def init_db():
         )
     """)
 
-    # MIGRAÇÃO AUTOMÁTICA: orcamentos
-    c.execute("PRAGMA table_info(orcamentos)")
-    cols_orc = [col[1] for col in c.fetchall()]
-    if "proposta_num" not in cols_orc:
-        c.execute("ALTER TABLE orcamentos ADD COLUMN proposta_num TEXT DEFAULT '2358'")
-    if "consultor" not in cols_orc:
-        c.execute("ALTER TABLE orcamentos ADD COLUMN consultor TEXT")
-
-    # Tabela de Ambientes
+    # Ambientes
     c.execute("""
         CREATE TABLE IF NOT EXISTS ambientes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,7 +97,7 @@ def init_db():
         )
     """)
 
-    # Tabela de Itens
+    # Itens / Subitens
     c.execute("""
         CREATE TABLE IF NOT EXISTS itens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,21 +123,29 @@ def get_config():
         d.setdefault('ie', '186000158114')
         d.setdefault('logo_path', '')
         return d
-    return {
-        'nome_empresa': 'Fábrica de Móveis Laurenti Ltda',
-        'cnpj': '44.331.015/0001-08',
-        'ie': '186000158114',
-        'endereco': 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP',
-        'telefone': '(17) 3576-1464',
-        'email': 'contato@laurentimoveis.com.br',
-        'logo_path': ''
-    }
+    return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': ''}
 
 def get_consultores():
     conn = get_connection()
     return pd.read_sql_query("SELECT * FROM consultores ORDER BY nome ASC", conn)
 
-# Canvas com Contagem de Páginas (Página X de Y)
+def get_proxima_proposta():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT MAX(proposta_num) FROM orcamentos")
+    max_num = c.fetchone()[0]
+    return (max_num + 1) if max_num else 2358
+
+def get_ultimas_condicoes():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes FROM orcamentos ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    if row:
+        return {'consultor': row[0], 'prazo_entrega': row[1], 'condicoes_pagamento': row[2], 'observacoes': row[3]}
+    return {'consultor': 'Sem Consultor', 'prazo_entrega': '120 dias após medições finais.', 'condicoes_pagamento': '8 PARCELAS', 'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
+
+# Canvas Dinâmico com Numeração de Páginas (Página X de Y)
 class NumberedCanvas(canvas.Canvas):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -180,19 +169,16 @@ class NumberedCanvas(canvas.Canvas):
         self.setFont("Helvetica", 7)
         self.setFillColor(colors.HexColor("#333333"))
         
-        # Linha de separação do rodapé
         self.setStrokeColor(colors.HexColor("#BDC3C7"))
         self.setLineWidth(0.5)
         self.line(1.2*cm, 1.8*cm, A4[0] - 1.2*cm, 1.8*cm)
         
-        # Dados da Fábrica
         line1 = f"{config.get('nome_empresa', '')} CNPJ: {config.get('cnpj', '')} IE: {config.get('ie', '')}"
         line2 = f"{config.get('endereco', '')} / Fone: {config.get('telefone', '')}"
         
         self.drawString(1.2*cm, 1.3*cm, line1)
         self.drawString(1.2*cm, 0.9*cm, line2)
         
-        # Paginação e Data/Hora
         data_hora_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         page_str = f"Página {self._pageNumber} de {page_count}"
         
@@ -201,7 +187,7 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 # -----------------------------------------------------------------------------
-# 2. GERADOR DE PDF FIEL AO MODELO FORNECIDO
+# 2. GERADOR DE PDF
 # -----------------------------------------------------------------------------
 def gerar_pdf_orcamento(cliente_info, ambientes_list):
     config = get_config()
@@ -219,17 +205,19 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story = []
     styles = getSampleStyleSheet()
     
-    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.HexColor('#222222'))
+    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8, leading=11, textColor=colors.HexColor('#222222'))
     body_bold = ParagraphStyle('BodyBold', parent=body_style, fontName='Helvetica-Bold')
     right_bold = ParagraphStyle('RightBold', parent=body_bold, alignment=2)
+    right_normal = ParagraphStyle('RightNormal', parent=body_style, alignment=2)
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
+    amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#0F172A'))
 
-    # Bloco do Cabeçalho (Logo / Dados do Cliente / Bloco Proposta)
-    col_logo = Paragraph("<b>[ LOGO LAURENTI ]</b>", body_bold)
+    # Cabeçalho
+    col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
     if logo_p and os.path.exists(logo_p):
         try:
-            col_logo = RLImage(logo_p, width=3.5*cm, height=1.5*cm)
+            col_logo = RLImage(logo_p, width=3.8*cm, height=1.4*cm)
         except Exception:
             pass
 
@@ -261,13 +249,14 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_head)
     story.append(Spacer(1, 10))
 
-    # Tabela Principal de Ambientes e Itens
+    # Tabela de Ambientes e Itens (Destaque para o Ambiente na Linha Superior)
     table_data = [
         [Paragraph("<b>Item</b>", header_title), Paragraph("<b>Valor (R$)</b>", ParagraphStyle('HRight', parent=header_title, alignment=2))]
     ]
     
     tot_liquido = 0.0
     tot_opcionais = 0.0
+    row_styles = []
 
     for idx_a, amb in enumerate(ambientes_list):
         ordem_amb = idx_a + 1
@@ -278,8 +267,16 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         
         tot_amb = sum(float(i['valor']) for i in itens_normais)
         tot_liquido += tot_amb
+        tot_amb_str = f"R$ {tot_amb:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        # Requisito 8: Nome do Ambiente na Linha Superior em Destaque
+        current_row = len(table_data)
+        amb_header_text = f"<b>{ordem_amb}- {nome_amb_upper}</b>"
+        table_data.append([Paragraph(amb_header_text, amb_title_style), Paragraph(f"<b>{tot_amb_str}</b>", right_bold)])
+        row_styles.append(('BACKGROUND', (0, current_row), (-1, current_row), colors.HexColor('#F1F5F9')))
         
-        desc_amb_text = f"<b>{ordem_amb}- {nome_amb_upper}:</b> {amb.get('especificacoes', '')}"
+        # Requisito 3: Descrições dos subitens com quebra de linha automática
+        desc_amb_text = f"<i>{amb.get('especificacoes', '')}</i>" if amb.get('especificacoes') else ""
         
         for item in itens_normais:
             val_f = f"{float(item['valor']):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -293,44 +290,50 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
                 val_f = f"{val_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 desc_amb_text += f"<br/>- {item['descricao']}, acréscimo - R$ {val_f}"
 
-        tot_amb_str = f"<b>{tot_amb:,.2f}</b>".replace(",", "X").replace(".", ",").replace("X", ".")
-        
-        table_data.append([
-            Paragraph(desc_amb_text, body_style),
-            Paragraph(tot_amb_str, right_bold)
-        ])
+        table_data.append([Paragraph(desc_amb_text, body_style), Paragraph("", body_style)])
 
     t_itens = Table(table_data, colWidths=[14.6*cm, 4*cm])
-    t_itens.setStyle(TableStyle([
+    
+    t_style = [
         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#E2E8F0')),
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#94A3B8')),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
         ('PADDING', (0,0), (-1,-1), 6),
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-    ]))
+    ] + row_styles
+    
+    t_itens.setStyle(TableStyle(t_style))
     story.append(t_itens)
     story.append(Spacer(1, 10))
 
-    # Totais e Condições Comerciais
+    # Requisito 7: Total Líquido e Total c/ Opcionais destacados no final (lado a lado com as observações)
     tot_com_opc = tot_liquido + tot_opcionais
-    
-    tot_liquido_str = f"{tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    tot_com_opc_str = f"{tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     cond_text = f"""
-    <b>Total Líquido:</b> R$ {tot_liquido_str}<br/>
     <b>Prazo de Entrega:</b> {cliente_info['prazo_entrega']}<br/>
     <b>Condição de Pagamento:</b> {cliente_info['condicoes_pagamento']}<br/>
-    <b>Observações:</b> {cliente_info['observacoes']}<br/><br/>
-    <b>Total Móveis sem Amortecimentos/Opcionais:</b> R$ {tot_liquido_str}<br/>
-    <b>Total Móveis com Amortecimentos/Opcionais:</b> R$ {tot_com_opc_str}
+    <b>Observações:</b> {cliente_info['observacoes']}
     """
     
-    t_cond = Table([[Paragraph(cond_text, body_style)]], colWidths=[18.6*cm])
+    totais_box_text = f"""
+    <font size=9 color='#64748B'><b>Total Líquido:</b></font><br/>
+    <font size=11 color='#0F172A'><b>{tot_liquido_str}</b></font><br/><br/>
+    <font size=8 color='#64748B'>Total c/ Opcionais:</font><br/>
+    <font size=10 color='#D97706'><b>{tot_com_opc_str}</b></font>
+    """
+    
+    t_cond = Table([
+        [Paragraph(cond_text, body_style), Paragraph(totais_box_text, right_bold)]
+    ], colWidths=[13.6*cm, 5*cm])
+    
     t_cond.setStyle(TableStyle([
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
-        ('PADDING', (0,0), (-1,-1), 6),
+        ('BACKGROUND', (0,0), (0,0), colors.HexColor('#F8FAFC')),
+        ('BACKGROUND', (1,0), (1,0), colors.HexColor('#F1F5F9')),
+        ('PADDING', (0,0), (-1,-1), 8),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
     story.append(t_cond)
 
@@ -346,6 +349,9 @@ if 'ambientes' not in st.session_state:
 
 if 'edit_index' not in st.session_state:
     st.session_state.edit_index = None
+
+if 'confirm_del' not in st.session_state:
+    st.session_state.confirm_del = None
 
 def recalcular_totais():
     total_liquido = 0.0
@@ -370,40 +376,53 @@ menu = st.sidebar.radio("Navegação", ["➕ Novo / Editar Orçamento", "📋 Or
 if menu == "➕ Novo / Editar Orçamento":
     st.subheader("Formulário de Orçamento")
     
+    ultimas_cond = get_ultimas_condicoes()
     df_cons = get_consultores()
     consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["Sem Consultor"]
 
     if st.button("✨ Criar Novo Orçamento Limpo"):
         st.session_state.ambientes = []
         st.session_state.edit_index = None
+        st.session_state.cli_nome = ""
+        st.session_state.cli_contato = ""
+        st.session_state.cli_tel = ""
+        st.session_state.cli_email = ""
         st.rerun()
+
+    # Requisito 5: Proposta é um número sequencial automático e inalterável
+    prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
 
     with st.expander("👤 Dados do Cliente e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Ex: LUCIANA ANASTACIO DE SOUZA")
-            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Ex: LUCIANA")
+            # Requisito 2: Dados do cliente em branco por padrão
+            cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa")
+            contato = st.text_input("Contato", value=st.session_state.get('cli_contato', ''), placeholder="Nome do responsável")
             tipo_contato = st.selectbox("Tipo de Contato", ["Residencial", "Comercial", "Arquitetura", "Outros"])
-            consultor = st.selectbox("Consultor *", consultores_opts)
+            
+            # Requisito 4: Puxar consultor do último orçamento
+            idx_cons_padrao = consultores_opts.index(ultimas_cond['consultor']) if ultimas_cond['consultor'] in consultores_opts else 0
+            consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao)
         
         with col2:
-            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(11) 97027-7655")
+            telefone = st.text_input("Telefone", value=st.session_state.get('cli_tel', ''), placeholder="(00) 00000-0000")
             email = st.text_input("E-mail", value=st.session_state.get('cli_email', ''), placeholder="cliente@email.com")
             data_atual = st.date_input("Data da Proposta", value=datetime.now().date())
             
         with col3:
-            proposta_num = st.text_input("Proposta Nº", value=st.session_state.get('cli_prop', '2358'))
+            st.text_input("Proposta Nº (Automático)", value=str(prop_num_atual), disabled=True)
             dias_validade = st.radio("Validade em Dias", [7, 10, 15, 30], index=3, horizontal=True)
             data_validade = data_atual + timedelta(days=dias_validade)
             st.info(f"📅 **Validade:** {data_validade.strftime('%d/%m/%Y')}")
             
+        # Requisito 4: Carregar Prazo, Condições e Observações do último orçamento
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
-            prazo_entrega = st.text_input("Prazo de Entrega", value="120 dias após medições finais.")
+            prazo_entrega = st.text_input("Prazo de Entrega", value=ultimas_cond['prazo_entrega'])
         with col_cond2:
-            condicoes_pagamento = st.text_input("Condições de Pagamento", value="8 PARCELAS")
+            condicoes_pagamento = st.text_input("Condições de Pagamento", value=ultimas_cond['condicoes_pagamento'])
             
-        observacoes = st.text_area("Observações Gerais", value="Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm")
+        observacoes = st.text_area("Observações Gerais", value=ultimas_cond['observacoes'])
 
     st.markdown("---")
     st.subheader("🛋️ Ambientes e Subitens")
@@ -413,7 +432,7 @@ if menu == "➕ Novo / Editar Orçamento":
         with col_amb1:
             nome_amb = st.text_input("Nome do Ambiente *", placeholder="Ex: COZINHA, GOURMET, SALA")
         with col_amb2:
-            espec_amb = st.text_input("Especificações do Ambiente", placeholder="Ex: MDF Nogueira Ambar Guararapes / MDF Nude Vel Berneck")
+            espec_amb = st.text_input("Especificações do Ambiente", placeholder="Ex: MDF Nogueira Ambar / MDF Nude Vel")
         
         btn_add_amb = st.form_submit_button("➕ Adicionar Ambiente")
         if btn_add_amb:
@@ -440,8 +459,19 @@ if menu == "➕ Novo / Editar Orçamento":
                     amb['especificacoes'] = st.text_input(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{idx_amb}")
                 with col_e3:
                     st.write(" ")
-                    if st.button("🗑️ Remover Ambiente", key=f"del_amb_{idx_amb}"):
+                    # Requisito 1: Pedir confirmação ao excluir ambiente
+                    if st.button("🗑️ Remover Ambiente", key=f"del_amb_btn_{idx_amb}"):
+                        st.session_state.confirm_del = f"amb_{idx_amb}"
+
+                if st.session_state.confirm_del == f"amb_{idx_amb}":
+                    st.warning("⚠️ Confirma a exclusão deste ambiente e todos seus itens?")
+                    c_del1, c_del2 = st.columns(2)
+                    if c_del1.button("✅ Confirmar Exclusão", key=f"conf_del_amb_{idx_amb}"):
                         st.session_state.ambientes.pop(idx_amb)
+                        st.session_state.confirm_del = None
+                        st.rerun()
+                    if c_del2.button("❌ Cancelar", key=f"canc_del_amb_{idx_amb}"):
+                        st.session_state.confirm_del = None
                         st.rerun()
 
                 st.markdown(f"##### Subitens do Ambiente {ordem_amb}")
@@ -495,12 +525,13 @@ if menu == "➕ Novo / Editar Orçamento":
 
     col_btn1, col_btn2 = st.columns(2)
     
+    # Requisito 6: Correção definitiva no salvamento de novos orçamentos
     with col_btn1:
         if st.button("💾 Salvar Orçamento no Banco", type="primary", use_container_width=True):
             if not cliente:
-                st.error("Preencha o nome do Cliente.")
+                st.error("Por favor, preencha o nome do Cliente.")
             elif not st.session_state.ambientes:
-                st.error("Adicione pelo menos um ambiente.")
+                st.error("Adicione pelo menos um ambiente antes de salvar.")
             else:
                 conn = get_connection()
                 c = conn.cursor()
@@ -511,12 +542,12 @@ if menu == "➕ Novo / Editar Orçamento":
                     c.execute("""
                         UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?
                         WHERE id=?
-                    """, (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
+                    """, (prop_num_atual, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
                 else:
                     c.execute("""
                         INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
+                    """, (prop_num_atual, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
                     orc_id = c.lastrowid
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
@@ -533,12 +564,12 @@ if menu == "➕ Novo / Editar Orçamento":
                         """, (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0))
                 
                 conn.commit()
-                st.success(f"✅ Orçamento #{orc_id} salvo com sucesso!")
+                st.success(f"✅ Orçamento Proposta Nº {prop_num_atual} salvo com sucesso!")
 
     with col_btn2:
         if cliente and st.session_state.ambientes:
             cli_info = {
-                'proposta_num': proposta_num,
+                'proposta_num': prop_num_atual,
                 'cliente': cliente,
                 'contato': contato,
                 'tipo_contato': tipo_contato,
@@ -556,7 +587,7 @@ if menu == "➕ Novo / Editar Orçamento":
             st.download_button(
                 label="📄 Exportar Orçamento em PDF",
                 data=pdf_bytes,
-                file_name=f"Orcamento_{cliente.replace(' ', '_')}.pdf",
+                file_name=f"Orcamento_{prop_num_atual}_{cliente.replace(' ', '_')}.pdf",
                 mime="application/pdf",
                 use_container_width=True
             )
@@ -567,13 +598,13 @@ elif menu == "📋 Orçamentos Salvos":
     conn = get_connection()
     c = conn.cursor()
     
-    df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, total_com_opcionais FROM orcamentos ORDER BY id DESC", conn)
+    df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido FROM orcamentos ORDER BY id DESC", conn)
     
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
             with st.container():
                 col_a1, col_a2, col_a3, col_a4, col_a5 = st.columns([1.5, 3, 2, 1.2, 1.2])
-                col_a1.write(f"**#{row['id']}** (Prop: {row['proposta_num']})")
+                col_a1.write(f"**Proposta: #{row['proposta_num']}**")
                 col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
@@ -607,14 +638,25 @@ elif menu == "📋 Orçamentos Salvos":
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
-                    st.success(f"Orçamento #{row['id']} carregado! Mudando para o formulário...")
+                    st.success(f"Orçamento #{row['proposta_num']} carregado!")
                     st.rerun()
 
+                # Requisito 1: Confirmação de exclusão nos Orçamentos Salvos
                 if col_a5.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
-                    c.execute("DELETE FROM orcamentos WHERE id = ?", (row['id'],))
-                    conn.commit()
-                    st.success("Orçamento excluído!")
-                    st.rerun()
+                    st.session_state.confirm_del = f"orc_{row['id']}"
+
+                if st.session_state.confirm_del == f"orc_{row['id']}":
+                    st.warning(f"⚠️ Confirma a exclusão permanente do Orçamento Proposta #{row['proposta_num']}?")
+                    c_del1, c_del2 = st.columns(2)
+                    if c_del1.button("✅ Confirmar", key=f"conf_del_orc_{row['id']}"):
+                        c.execute("DELETE FROM orcamentos WHERE id = ?", (row['id'],))
+                        conn.commit()
+                        st.session_state.confirm_del = None
+                        st.rerun()
+                    if c_del2.button("❌ Cancelar", key=f"canc_del_orc_{row['id']}"):
+                        st.session_state.confirm_del = None
+                        st.rerun()
+
                 st.markdown("---")
     else:
         st.info("Nenhum orçamento cadastrado.")
@@ -676,7 +718,19 @@ elif menu == "⚙️ Configurações":
         for _, r in df_c.iterrows():
             col_cons1, col_cons2 = st.columns([4, 1])
             col_cons1.write(f"👤 **{r['nome']}**")
-            if col_cons2.button("🗑️ Excluir", key=f"del_cons_{r['id']}"):
-                c.execute("DELETE FROM consultores WHERE id = ?", (r['id'],))
-                conn.commit()
-                st.rerun()
+            
+            # Requisito 1: Trava de confirmação na exclusão de consultores
+            if col_cons2.button("🗑️ Excluir", key=f"del_cons_btn_{r['id']}"):
+                st.session_state.confirm_del = f"cons_{r['id']}"
+
+            if st.session_state.confirm_del == f"cons_{r['id']}":
+                st.warning(f"⚠️ Remover o consultor '{r['nome']}'?")
+                c_del1, c_del2 = st.columns(2)
+                if c_del1.button("✅ Confirmar", key=f"conf_del_cons_{r['id']}"):
+                    c.execute("DELETE FROM consultores WHERE id = ?", (r['id'],))
+                    conn.commit()
+                    st.session_state.confirm_del = None
+                    st.rerun()
+                if c_del2.button("❌ Cancelar", key=f"canc_del_cons_{r['id']}"):
+                    st.session_state.confirm_del = None
+                    st.rerun()
