@@ -21,7 +21,9 @@ st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝"
 # 1. BANCO DE DADOS E MIGRAÇÕES (SQLite)
 # -----------------------------------------------------------------------------
 def get_connection():
-    return sqlite3.connect('orcamentos.db', check_same_thread=False)
+    conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row  # Permite acesso por nome de coluna
+    return conn
 
 def init_db():
     conn = get_connection()
@@ -37,18 +39,25 @@ def init_db():
             endereco TEXT,
             telefone TEXT,
             email TEXT,
-            logo_path TEXT
+            logo_path TEXT,
+            logo_largura REAL DEFAULT 5.0
         )
     """)
     
     c.execute("SELECT COUNT(*) FROM config_empresa")
     if c.fetchone()[0] == 0:
         c.execute("""
-            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path)
+            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura)
             VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
                     'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
-                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '')
+                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0)
         """)
+
+    # Migração automática de colunas para config_empresa
+    c.execute("PRAGMA table_info(config_empresa)")
+    colunas_config = [col[1] for col in c.fetchall()]
+    if 'logo_largura' not in colunas_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_largura REAL DEFAULT 5.0")
 
     # Consultores
     c.execute("""
@@ -87,8 +96,8 @@ def init_db():
     
     # Migração automática caso a coluna status não exista
     c.execute("PRAGMA table_info(orcamentos)")
-    colunas = [col[1] for col in c.fetchall()]
-    if 'status' not in colunas:
+    colunas_orc = [col[1] for col in c.fetchall()]
+    if 'status' not in colunas_orc:
         c.execute("ALTER TABLE orcamentos ADD COLUMN status TEXT DEFAULT 'Em Análise'")
 
     # Ambientes
@@ -124,9 +133,11 @@ init_db()
 # Funções Auxiliares protegidas
 def get_config():
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM config_empresa WHERE id = 1", conn)
-    if not df.empty:
-        d = df.iloc[0].to_dict()
+    c = conn.cursor()
+    c.execute("SELECT * FROM config_empresa WHERE id = 1")
+    row = c.fetchone()
+    if row:
+        d = dict(row)
         d.setdefault('nome_empresa', 'Fábrica de Móveis Laurenti Ltda')
         d.setdefault('cnpj', '44.331.015/0001-08')
         d.setdefault('ie', '186000158114')
@@ -134,8 +145,9 @@ def get_config():
         d.setdefault('telefone', '(17) 3576-1464')
         d.setdefault('email', 'contato@laurentimoveis.com.br')
         d.setdefault('logo_path', '')
+        d.setdefault('logo_largura', 5.0)
         return d
-    return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': ''}
+    return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0}
 
 def get_consultores():
     conn = get_connection()
@@ -146,9 +158,9 @@ def get_proxima_proposta():
     c = conn.cursor()
     c.execute("SELECT proposta_num FROM orcamentos ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
-    if row and row[0] is not None:
+    if row and row['proposta_num'] is not None:
         try:
-            val = int(row[0])
+            val = int(row['proposta_num'])
             return val + 1
         except ValueError:
             return 1
@@ -160,7 +172,12 @@ def get_ultimas_condicoes():
     c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes FROM orcamentos ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
     if row:
-        return {'consultor': row[0] or 'Sem Consultor', 'prazo_entrega': row[1] or '120 dias após medições finais.', 'condicoes_pagamento': row[2] or '8 PARCELAS', 'observacoes': row[3] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
+        return {
+            'consultor': row['consultor'] or 'Sem Consultor', 
+            'prazo_entrega': row['prazo_entrega'] or '120 dias após medições finais.', 
+            'condicoes_pagamento': row['condicoes_pagamento'] or '8 PARCELAS', 
+            'observacoes': row['observacoes'] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'
+        }
     return {'consultor': 'Sem Consultor', 'prazo_entrega': '120 dias após medições finais.', 'condicoes_pagamento': '8 PARCELAS', 'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'}
 
 # Canvas Dinâmico com Numeração de Páginas (Página X de Y)
@@ -229,14 +246,17 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
     amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9.5, textColor=colors.HexColor('#0F172A'))
 
+    # Configuração dinâmica de tamanho do Logo
+    logo_largura_cm = float(config.get('logo_largura', 5.0))
     col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
+    
     if logo_p and os.path.exists(logo_p):
         try:
             with Image.open(logo_p) as img:
                 w_orig, h_orig = img.size
-                max_w = 4.0 * cm
-                max_h = 1.5 * cm
+                max_w = logo_largura_cm * cm
+                max_h = 3.0 * cm
                 ratio = min(max_w / w_orig, max_h / h_orig)
                 final_w = w_orig * ratio
                 final_h = h_orig * ratio
@@ -261,9 +281,13 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     <b>Validade:</b> {cliente_info.get('validade', '')}
     """
     
+    # Larguras adaptáveis de acordo com o tamanho do logo
+    width_col_logo = max(logo_largura_cm + 0.5, 4.0) * cm
+    width_col_cli = (14.2 * cm) - width_col_logo
+    
     t_head = Table([
         [col_logo, Paragraph(cli_text, body_style), Paragraph(prop_text, body_style)]
-    ], colWidths=[4.2*cm, 10.0*cm, 4.4*cm])
+    ], colWidths=[width_col_logo, width_col_cli, 4.4*cm])
     
     t_head.setStyle(TableStyle([
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
@@ -298,11 +322,14 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         table_data.append([Paragraph(amb_header_text, amb_title_style), Paragraph(f"<b>{tot_amb_str}</b>", right_bold)])
         row_styles.append(('BACKGROUND', (0, current_row), (-1, current_row), colors.HexColor('#F1F5F9')))
         
-        desc_amb_text = f"<i>{amb.get('especificacoes', '')}</i>" if amb.get('especificacoes') else ""
+        # Converte quebras de linha para <br/>
+        espec_fmt = amb.get('especificacoes', '').replace('\n', '<br/>')
+        desc_amb_text = f"<i>{espec_fmt}</i>" if espec_fmt else ""
         
         for item in itens_normais:
             val_f = f"{float(item['valor']):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            desc_amb_text += f"<br/>- {item['descricao']} - R$ {val_f}"
+            desc_item = item['descricao'].replace('\n', '<br/>&nbsp;&nbsp;&nbsp;&nbsp;')
+            desc_amb_text += f"<br/>- {desc_item} - R$ {val_f}"
             
         if itens_opcionais:
             desc_amb_text += "<br/><br/><b>• Acessórios opcionais a serem acrescidos:</b>"
@@ -310,7 +337,8 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
                 val_opc = float(item['valor'])
                 tot_opcionais += val_opc
                 val_f = f"{val_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                desc_amb_text += f"<br/>- {item['descricao']}, acréscimo - R$ {val_f}"
+                desc_item = item['descricao'].replace('\n', '<br/>&nbsp;&nbsp;&nbsp;&nbsp;')
+                desc_amb_text += f"<br/>- {desc_item}, acréscimo - R$ {val_f}"
 
         table_data.append([Paragraph(desc_amb_text, body_style), Paragraph("", body_style)])
 
@@ -332,10 +360,11 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+    obs_fmt = cliente_info.get('observacoes', '').replace('\n', '<br/>')
     cond_text = f"""
     <b>Prazo de Entrega:</b> {cliente_info.get('prazo_entrega', '')}<br/>
     <b>Condição de Pagamento:</b> {cliente_info.get('condicoes_pagamento', '')}<br/>
-    <b>Observações:</b> {cliente_info.get('observacoes', '')}
+    <b>Observações:</b> {obs_fmt}
     """
     
     totais_box_text = f"""
@@ -374,13 +403,29 @@ if 'edit_index' not in st.session_state:
 if 'confirm_del' not in st.session_state:
     st.session_state.confirm_del = None
 
-# Controle de navegação seguro
+# Função para resetar limpo o formulário de novo orçamento
+def reseta_formulario_limpo():
+    ultimas_cond = get_ultimas_condicoes()
+    st.session_state.ambientes = []
+    st.session_state.edit_index = None
+    st.session_state.cli_nome = ""
+    st.session_state.cli_contato = ""
+    st.session_state.cli_tel = ""
+    st.session_state.cli_email = ""
+    st.session_state.cli_tipo = "Residencial"
+    st.session_state.cli_consultor = ultimas_cond['consultor']
+    st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
+    st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
+    st.session_state.cli_obs = ultimas_cond['observacoes']
+    st.session_state.cli_prop = get_proxima_proposta()
+    st.session_state.cli_status = "Em Análise"
+
+# Gestão de Navegação
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
 
 if 'nav_tab' not in st.session_state:
     st.session_state.nav_tab = opcoes_menu[0]
 
-# Trata requisição de redirecionamento antes de desenhar o sidebar radio
 if 'change_tab_to' in st.session_state and st.session_state.change_tab_to:
     st.session_state.nav_tab = st.session_state.change_tab_to
     st.session_state.change_tab_to = None
@@ -414,19 +459,7 @@ if menu == "➕ Novo / Editar Orçamento":
     consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["Sem Consultor"]
 
     if st.button("✨ Criar Novo Orçamento Limpo"):
-        st.session_state.ambientes = []
-        st.session_state.edit_index = None
-        st.session_state.cli_nome = ""
-        st.session_state.cli_contato = ""
-        st.session_state.cli_tel = ""
-        st.session_state.cli_email = ""
-        st.session_state.cli_tipo = "Residencial"
-        st.session_state.cli_consultor = ultimas_cond['consultor']
-        st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
-        st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
-        st.session_state.cli_obs = ultimas_cond['observacoes']
-        st.session_state.cli_prop = get_proxima_proposta()
-        st.session_state.cli_status = "Em Análise"
+        reseta_formulario_limpo()
         st.rerun()
 
     prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
@@ -491,7 +524,7 @@ if menu == "➕ Novo / Editar Orçamento":
         with col_amb1:
             nome_amb = st.text_input("Nome do Ambiente *", placeholder="Ex: COZINHA, GOURMET, SALA")
         with col_amb2:
-            espec_amb = st.text_input("Especificações do Ambiente", placeholder="Ex: MDF Nogueira Ambar / MDF Nude Vel")
+            espec_amb = st.text_area("Especificações do Ambiente", placeholder="Ex: MDF Nogueira Ambar / MDF Nude Vel\n(Pressione Enter para quebrar linha)", height=68)
         
         btn_add_amb = st.form_submit_button("➕ Adicionar Ambiente")
         if btn_add_amb:
@@ -515,7 +548,7 @@ if menu == "➕ Novo / Editar Orçamento":
                 with col_e1:
                     amb['nome'] = st.text_input(f"Nome #{ordem_amb}", value=amb['nome'], key=f"edit_nome_{idx_amb}")
                 with col_e2:
-                    amb['especificacoes'] = st.text_input(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{idx_amb}")
+                    amb['especificacoes'] = st.text_area(f"Especificações #{ordem_amb}", value=amb['especificacoes'], key=f"edit_espec_{idx_amb}", height=68)
                 with col_e3:
                     st.write(" ")
                     if st.button("🗑️ Remover Ambiente", key=f"del_amb_btn_{idx_amb}"):
@@ -537,7 +570,7 @@ if menu == "➕ Novo / Editar Orçamento":
                 with st.form(f"form_add_subitem_{idx_amb}", clear_on_submit=True):
                     col_i1, col_i2, col_i3, col_i4 = st.columns([3, 1.5, 1, 1])
                     with col_i1:
-                        desc_sub = st.text_input("Descrição do Subitem", placeholder="Ex: Armário aéreo 3,67m, com 8 portas")
+                        desc_sub = st.text_area("Descrição do Subitem", placeholder="Ex: Armário aéreo 3,67m\n8 portas basculantes", height=68)
                     with col_i2:
                         val_sub = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f")
                     with col_i3:
@@ -561,7 +594,7 @@ if menu == "➕ Novo / Editar Orçamento":
                         tag_opc = " (OPCIONAL)" if item['eh_opcional'] else ""
                         col_it1, col_it2, col_it3, col_it4 = st.columns([3, 1.5, 1, 0.5])
                         with col_it1:
-                            item['descricao'] = st.text_input(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{idx_amb}_{idx_item}")
+                            item['descricao'] = st.text_area(f"Subitem {ordem_amb}.{idx_item+1}{tag_opc}", value=item['descricao'], key=f"item_desc_{idx_amb}_{idx_item}", height=68)
                         with col_it2:
                             item['valor'] = st.number_input("Valor R$", value=float(item['valor']), step=50.0, format="%.2f", key=f"item_val_{idx_amb}_{idx_item}")
                         with col_it3:
@@ -675,40 +708,41 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR
+                # BOTÃO EDITAR (Puxa colunas por nome para evitar desalinhamento)
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
-                    st.session_state.edit_index = row['id']
-                    
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                    o = c.fetchone()
+                    o = dict(c.fetchone())
                     
-                    st.session_state.cli_prop = o[1]
-                    st.session_state.cli_nome = o[2]
-                    st.session_state.cli_contato = o[3]
-                    st.session_state.cli_tipo = o[4]
-                    st.session_state.cli_tel = o[5]
-                    st.session_state.cli_email = o[6]
-                    st.session_state.cli_consultor = o[7]
-                    st.session_state.cli_prazo = o[11]
-                    st.session_state.cli_cond = o[12]
-                    st.session_state.cli_obs = o[13]
-                    st.session_state.cli_status = o[16] if len(o) > 16 and o[16] else "Em Análise"
+                    st.session_state.edit_index = o['id']
+                    st.session_state.cli_prop = o['proposta_num']
+                    st.session_state.cli_nome = o['cliente'] or ""
+                    st.session_state.cli_contato = o['contato'] or ""
+                    st.session_state.cli_tipo = o['tipo_contato'] or "Residencial"
+                    st.session_state.cli_tel = o['telefone'] or ""
+                    st.session_state.cli_email = o['email'] or ""
+                    st.session_state.cli_consultor = o['consultor'] or "Sem Consultor"
+                    st.session_state.cli_prazo = o['prazo_entrega'] or ""
+                    st.session_state.cli_cond = o['condicoes_pagamento'] or ""
+                    st.session_state.cli_obs = o['observacoes'] or ""
+                    st.session_state.cli_status = o.get('status', 'Em Análise')
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
                     for amb_row in c.fetchall():
+                        amb_dict = dict(amb_row)
                         itens_db = []
-                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_row[0],))
+                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
                         for item_row in c.fetchall():
+                            item_dict = dict(item_row)
                             itens_db.append({
-                                'descricao': item_row[0],
-                                'valor': item_row[1],
-                                'eh_opcional': bool(item_row[2])
+                                'descricao': item_dict['descricao'],
+                                'valor': item_dict['valor'],
+                                'eh_opcional': bool(item_dict['eh_opcional'])
                             })
                         ambs_db.append({
-                            'nome': amb_row[1],
-                            'especificacoes': amb_row[2],
-                            'total_ambiente': amb_row[3],
+                            'nome': amb_dict['nome_ambiente'],
+                            'especificacoes': amb_dict['especificacoes'] or "",
+                            'total_ambiente': amb_dict['total_ambiente'],
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
@@ -717,38 +751,39 @@ elif menu == "📋 Orçamentos Salvos":
 
                 # BOTÃO CLONAR
                 if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
+                    c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
+                    o = dict(c.fetchone())
+                    
                     st.session_state.edit_index = None
                     st.session_state.cli_prop = get_proxima_proposta()
-                    
-                    c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                    o = c.fetchone()
-                    
-                    st.session_state.cli_nome = f"{o[2]} (Cópia)"
-                    st.session_state.cli_contato = o[3]
-                    st.session_state.cli_tipo = o[4]
-                    st.session_state.cli_tel = o[5]
-                    st.session_state.cli_email = o[6]
-                    st.session_state.cli_consultor = o[7]
-                    st.session_state.cli_prazo = o[11]
-                    st.session_state.cli_cond = o[12]
-                    st.session_state.cli_obs = o[13]
+                    st.session_state.cli_nome = f"{o['cliente']} (Cópia)"
+                    st.session_state.cli_contato = o['contato'] or ""
+                    st.session_state.cli_tipo = o['tipo_contato'] or "Residencial"
+                    st.session_state.cli_tel = o['telefone'] or ""
+                    st.session_state.cli_email = o['email'] or ""
+                    st.session_state.cli_consultor = o['consultor'] or "Sem Consultor"
+                    st.session_state.cli_prazo = o['prazo_entrega'] or ""
+                    st.session_state.cli_cond = o['condicoes_pagamento'] or ""
+                    st.session_state.cli_obs = o['observacoes'] or ""
                     st.session_state.cli_status = "Em Análise"
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
                     for amb_row in c.fetchall():
+                        amb_dict = dict(amb_row)
                         itens_db = []
-                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_row[0],))
+                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
                         for item_row in c.fetchall():
+                            item_dict = dict(item_row)
                             itens_db.append({
-                                'descricao': item_row[0],
-                                'valor': item_row[1],
-                                'eh_opcional': bool(item_row[2])
+                                'descricao': item_dict['descricao'],
+                                'valor': item_dict['valor'],
+                                'eh_opcional': bool(item_dict['eh_opcional'])
                             })
                         ambs_db.append({
-                            'nome': amb_row[1],
-                            'especificacoes': amb_row[2],
-                            'total_ambiente': amb_row[3],
+                            'nome': amb_dict['nome_ambiente'],
+                            'especificacoes': amb_dict['especificacoes'] or "",
+                            'total_ambiente': amb_dict['total_ambiente'],
                             'itens': itens_db
                         })
                     st.session_state.ambientes = ambs_db
@@ -757,28 +792,30 @@ elif menu == "📋 Orçamentos Salvos":
 
                 # PDF Direto na Lista
                 c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                o_saved = c.fetchone()
+                o_saved = dict(c.fetchone())
                 ambs_saved = []
                 c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
                 for amb_row in c.fetchall():
+                    amb_dict = dict(amb_row)
                     itens_saved = []
-                    c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_row[0],))
+                    c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
                     for item_row in c.fetchall():
-                        itens_saved.append({'descricao': item_row[0], 'valor': item_row[1], 'eh_opcional': bool(item_row[2])})
-                    ambs_saved.append({'nome': amb_row[1], 'especificacoes': amb_row[2], 'total_ambiente': amb_row[3], 'itens': itens_saved})
+                        item_dict = dict(item_row)
+                        itens_saved.append({'descricao': item_dict['descricao'], 'valor': item_dict['valor'], 'eh_opcional': bool(item_dict['eh_opcional'])})
+                    ambs_saved.append({'nome': amb_dict['nome_ambiente'], 'especificacoes': amb_dict['especificacoes'] or "", 'total_ambiente': amb_dict['total_ambiente'], 'itens': itens_saved})
 
                 cli_saved_info = {
-                    'proposta_num': p_fmt, 'cliente': o_saved[2], 'contato': o_saved[3], 'tipo_contato': o_saved[4],
-                    'telefone': o_saved[5], 'email': o_saved[6], 'consultor': o_saved[7], 'data': o_saved[8],
-                    'dias_validade': o_saved[9], 'validade': o_saved[10], 'prazo_entrega': o_saved[11],
-                    'condicoes_pagamento': o_saved[12], 'observacoes': o_saved[13]
+                    'proposta_num': p_fmt, 'cliente': o_saved['cliente'], 'contato': o_saved['contato'], 'tipo_contato': o_saved['tipo_contato'],
+                    'telefone': o_saved['telefone'], 'email': o_saved['email'], 'consultor': o_saved['consultor'], 'data': o_saved['data'],
+                    'dias_validade': o_saved['dias_validade'], 'validade': o_saved['validade'], 'prazo_entrega': o_saved['prazo_entrega'],
+                    'condicoes_pagamento': o_saved['condicoes_pagamento'], 'observacoes': o_saved['observacoes']
                 }
                 pdf_saved_bytes = gerar_pdf_orcamento(cli_saved_info, ambs_saved)
                 
                 col_a6.download_button(
                     label="📄 PDF",
                     data=pdf_saved_bytes,
-                    file_name=f"Orcamento_{p_fmt}_{o_saved[2].replace(' ', '_')}.pdf",
+                    file_name=f"Orcamento_{p_fmt}_{o_saved['cliente'].replace(' ', '_')}.pdf",
                     mime="application/pdf",
                     key=f"btn_pdf_orc_{row['id']}"
                 )
@@ -832,12 +869,15 @@ elif menu == "⚙️ Configurações":
         telefone = st.text_input("Telefone", value=config.get('telefone', '(17) 3576-1464'))
         email = st.text_input("E-mail", value=config.get('email', 'contato@laurentimoveis.com.br'))
         
+        # Campo para ajuste de tamanho da logo no PDF
+        logo_largura = st.slider("Largura da Logo no PDF (cm)", min_value=3.0, max_value=8.0, value=float(config.get('logo_largura', 5.0)), step=0.5)
+        
         if st.form_submit_button("💾 Salvar Dados da Empresa"):
             c.execute("""
                 UPDATE config_empresa
-                SET nome_empresa = ?, cnpj = ?, ie = ?, endereco = ?, telefone = ?, email = ?
+                SET nome_empresa = ?, cnpj = ?, ie = ?, endereco = ?, telefone = ?, email = ?, logo_largura = ?
                 WHERE id = 1
-            """, (nome_empresa, cnpj, ie, endereco, telefone, email))
+            """, (nome_empresa, cnpj, ie, endereco, telefone, email, logo_largura))
             conn.commit()
             st.success("Dados da empresa salvos!")
             st.rerun()
