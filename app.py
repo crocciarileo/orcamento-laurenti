@@ -715,8 +715,8 @@ if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 
 def tela_login():
-    st.markdown("<h2 style='text-align: center;'>🔐 Acesso ao Sistema Laurenti Móveis</h2>", unsafe_allow_text=True)
-    st.markdown("<p style='text-align: center; color: #64748B;'>Digite a senha de segurança para continuar</p>", unsafe_allow_text=True)
+    st.markdown("<h2 style='text-align: center;'>🔐 Acesso ao Sistema Laurenti Móveis</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #64748B;'>Digite a senha de segurança para continuar</p>", unsafe_allow_html=True)
     
     col_l1, col_l2, col_l3 = st.columns([1, 1.2, 1])
     with col_l2:
