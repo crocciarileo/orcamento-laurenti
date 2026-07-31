@@ -5,9 +5,23 @@ from datetime import datetime, timedelta
 import io
 import os
 import uuid
+import hashlib
 from PIL import Image
 
-# ReportLab para PDF institucional Laurenti Móveis
+# Exportações
+import docx
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+from docx.oxml import parse_xml, OxmlElement
+from docx.oxml.ns import nsdecls, qn
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ReportLab para PDF
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
@@ -23,8 +37,11 @@ st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝"
 # -----------------------------------------------------------------------------
 def get_connection():
     conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
-    conn.row_factory = sqlite3.Row  # Permite acesso por nome de coluna
+    conn.row_factory = sqlite3.Row
     return conn
+
+def hash_senha(senha_raw):
+    return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
 
 def init_db():
     conn = get_connection()
@@ -41,24 +58,28 @@ def init_db():
             telefone TEXT,
             email TEXT,
             logo_path TEXT,
-            logo_largura REAL DEFAULT 5.0
+            logo_largura REAL DEFAULT 5.0,
+            senha_hash TEXT
         )
     """)
     
     c.execute("SELECT COUNT(*) FROM config_empresa")
     if c.fetchone()[0] == 0:
         c.execute("""
-            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura)
+            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
             VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
                     'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
-                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0)
-        """)
+                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, ?)
+        """, (hash_senha("laurenti2026"),))
 
-    # Migração logo_largura
+    # Migração logo_largura e senha_hash
     c.execute("PRAGMA table_info(config_empresa)")
     colunas_config = [col[1] for col in c.fetchall()]
     if 'logo_largura' not in colunas_config:
         c.execute("ALTER TABLE config_empresa ADD COLUMN logo_largura REAL DEFAULT 5.0")
+    if 'senha_hash' not in colunas_config:
+        c.execute("ALTER TABLE config_empresa ADD COLUMN senha_hash TEXT")
+        c.execute("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha("laurenti2026"),))
 
     # Status Comercial Dinâmico
     c.execute("""
@@ -108,7 +129,6 @@ def init_db():
         )
     """)
     
-    # Migração status
     c.execute("PRAGMA table_info(orcamentos)")
     colunas_orc = [col[1] for col in c.fetchall()]
     if 'status' not in colunas_orc:
@@ -160,8 +180,9 @@ def get_config():
         d.setdefault('email', 'contato@laurentimoveis.com.br')
         d.setdefault('logo_path', '')
         d.setdefault('logo_largura', 5.0)
+        d.setdefault('senha_hash', hash_senha("laurenti2026"))
         return d
-    return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0}
+    return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0, 'senha_hash': hash_senha("laurenti2026")}
 
 def get_status_list():
     conn = get_connection()
@@ -212,7 +233,7 @@ def get_ultimas_condicoes():
         'status': default_status
     }
 
-# Canvas Dinâmico com Numeração de Páginas
+# Canvas Dinâmico para PDF
 class NumberedCanvas(canvas.Canvas):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -254,7 +275,7 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 # -----------------------------------------------------------------------------
-# 2. GERADOR DE PDF FIEL AO MODELO
+# 2. GERADORES DE ARQUIVOS (PDF, WORD, EXCEL)
 # -----------------------------------------------------------------------------
 def gerar_pdf_orcamento(cliente_info, ambientes_list):
     config = get_config()
@@ -431,8 +452,293 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     buffer.seek(0)
     return buffer
 
+def gerar_word_orcamento(cliente_info, ambientes_list):
+    config = get_config()
+    doc = Document()
+    
+    # Define margens de 1.2 cm
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(0.47)
+        section.bottom_margin = Inches(0.47)
+        section.left_margin = Inches(0.47)
+        section.right_margin = Inches(0.47)
+
+    # Tabela do Cabeçalho
+    t_head = doc.add_table(rows=1, cols=3)
+    t_head.alignment = WD_TABLE_ALIGNMENT.CENTER
+    t_head.autofit = False
+    
+    widths = [Inches(1.8), Inches(3.8), Inches(1.8)]
+    for i, col in enumerate(t_head.columns):
+        for cell in col.cells:
+            cell.width = widths[i]
+            
+    cell_logo, cell_cli, cell_prop = t_head.rows[0].cells
+    
+    logo_p = config.get('logo_path', '')
+    if logo_p and os.path.exists(logo_p):
+        try:
+            p_img = cell_logo.paragraphs[0]
+            p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_img.add_run().add_picture(logo_p, width=Inches(1.5))
+        except Exception:
+            cell_logo.paragraphs[0].text = config.get('nome_empresa', 'LAURENTI MÓVEIS')
+    else:
+        cell_logo.paragraphs[0].text = config.get('nome_empresa', 'LAURENTI MÓVEIS')
+        
+    p_cli = cell_cli.paragraphs[0]
+    p_cli.paragraph_format.line_spacing = 1.15
+    run_cli = p_cli.add_run(f"Cliente: {cliente_info.get('cliente', '')}\n")
+    run_cli.bold = True
+    p_cli.add_run(f"Contato: {cliente_info.get('contato', '')}\nConsultor: {cliente_info.get('consultor', '')}\nTipo: {cliente_info.get('tipo_contato', '')}\nFone: {cliente_info.get('telefone', '')}\nE-mail: {cliente_info.get('email', '')}")
+
+    p_prop = cell_prop.paragraphs[0]
+    p_prop.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_num = cliente_info.get('proposta_num', 1)
+    prop_str = f"{int(p_num):04d}" if str(p_num).isdigit() else str(p_num)
+    p_prop.add_run(f"Proposta: {prop_str}\n\nData: {cliente_info.get('data', '')}\n\nValidade: {cliente_info.get('validade', '')}")
+
+    doc.add_paragraph()
+
+    # Tabela de Ambientes e Itens
+    tot_liquido = 0.0
+    tot_opcionais = 0.0
+
+    t_itens = doc.add_table(rows=1, cols=2)
+    t_itens.alignment = WD_TABLE_ALIGNMENT.CENTER
+    t_itens.autofit = False
+    
+    t_itens.columns[0].width = Inches(5.8)
+    t_itens.columns[1].width = Inches(1.6)
+
+    hdr_cells = t_itens.rows[0].cells
+    hdr_cells[0].text = "Item / Descrição"
+    hdr_cells[1].text = "Valor (R$)"
+    hdr_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+    for idx_a, amb in enumerate(ambientes_list):
+        ordem_amb = idx_a + 1
+        itens_normais = [i for i in amb['itens'] if not i['eh_opcional']]
+        itens_opcionais = [i for i in amb['itens'] if i['eh_opcional']]
+        
+        tot_amb = sum(float(i['valor']) for i in itens_normais)
+        tot_liquido += tot_amb
+        tot_amb_str = f"R$ {tot_amb:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        # Linha Título Ambiente
+        row_amb = t_itens.add_row()
+        c_tit, c_val = row_amb.cells
+        p_tit = c_tit.paragraphs[0]
+        r_tit = p_tit.add_run(f"{ordem_amb}- {amb['nome'].upper()}")
+        r_tit.bold = True
+        
+        p_val = c_val.paragraphs[0]
+        p_val.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        r_val = p_val.add_run(tot_amb_str)
+        r_val.bold = True
+
+        # Linha Detalhes Subitens
+        row_desc = t_itens.add_row()
+        c_desc, _ = row_desc.cells
+        p_desc = c_desc.paragraphs[0]
+        
+        if amb.get('especificacoes'):
+            r_esp = p_desc.add_run(f"{amb['especificacoes']}\n")
+            r_esp.italic = True
+
+        for item in itens_normais:
+            val_f = f"{float(item['valor']):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            p_desc.add_run(f"- {item['descricao']} - R$ {val_f}\n")
+
+        if itens_opcionais:
+            p_desc.add_run("\n• Acessórios opcionais a serem acrescidos:\n")
+            for item in itens_opcionais:
+                val_opc = float(item['valor'])
+                tot_opcionais += val_opc
+                val_f = f"{val_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                p_desc.add_run(f"- {item['descricao']}, acréscimo - R$ {val_f}\n")
+
+    doc.add_paragraph()
+
+    # Totais
+    tot_com_opc = tot_liquido + tot_opcionais
+    tot_liq_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    tot_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    p_tot = doc.add_paragraph()
+    p_tot.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_tot.add_run(f"Total Líquido: {tot_liq_str}\n").bold = True
+    p_tot.add_run(f"Total c/ Opcionais: {tot_opc_str}").bold = True
+
+    doc.add_paragraph()
+
+    # Observações e Condições
+    p_cond = doc.add_paragraph()
+    p_cond.add_run(f"Prazo de Entrega: {cliente_info.get('prazo_entrega', '')}\n").bold = True
+    p_cond.add_run(f"Condição de Pagamento: {cliente_info.get('condicoes_pagamento', '')}\n").bold = True
+    p_cond.add_run(f"Observações: {cliente_info.get('observacoes', '')}")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+def gerar_excel_orcamento(cliente_info, ambientes_list):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Orçamento"
+    
+    ws.views.sheetView[0].showGridLines = True
+
+    # Estilos
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_bold = Font(name="Calibri", size=11, bold=True)
+    font_title = Font(name="Calibri", size=14, bold=True, color="1E293B")
+    fill_header = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    fill_amb = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    fill_tot = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+    align_right = Alignment(horizontal="right", vertical="top")
+    align_left = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+    config = get_config()
+    p_num = cliente_info.get('proposta_num', 1)
+    prop_str = f"{int(p_num):04d}" if str(p_num).isdigit() else str(p_num)
+
+    # Cabeçalho Empresa e Cliente
+    ws["A1"] = config.get('nome_empresa', 'LAURENTI MÓVEIS')
+    ws["A1"].font = font_title
+    
+    ws["A3"] = f"Cliente: {cliente_info.get('cliente', '')}"
+    ws["A3"].font = font_bold
+    ws["A4"] = f"Contato: {cliente_info.get('contato', '')}"
+    ws["A5"] = f"Telefone: {cliente_info.get('telefone', '')}"
+    ws["A6"] = f"E-mail: {cliente_info.get('email', '')}"
+
+    ws["C3"] = f"Proposta Nº: #{prop_str}"
+    ws["C3"].font = font_bold
+    ws["C4"] = f"Data: {cliente_info.get('data', '')}"
+    ws["C5"] = f"Validade: {cliente_info.get('validade', '')}"
+    ws["C6"] = f"Consultor: {cliente_info.get('consultor', '')}"
+
+    row_idx = 8
+    ws.cell(row=row_idx, column=1, value="Ambiente / Subitem").font = font_header
+    ws.cell(row=row_idx, column=1).fill = fill_header
+    ws.cell(row=row_idx, column=2, value="Tipo").font = font_header
+    ws.cell(row=row_idx, column=2).fill = fill_header
+    ws.cell(row=row_idx, column=3, value="Valor (R$)").font = font_header
+    ws.cell(row=row_idx, column=3).fill = fill_header
+    ws.cell(row=row_idx, column=3).alignment = align_right
+
+    row_idx += 1
+    tot_liquido = 0.0
+    tot_opcionais = 0.0
+
+    for idx_a, amb in enumerate(ambientes_list):
+        ordem_amb = idx_a + 1
+        itens_normais = [i for i in amb['itens'] if not i['eh_opcional']]
+        itens_opcionais = [i for i in amb['itens'] if i['eh_opcional']]
+        tot_amb = sum(float(i['valor']) for i in itens_normais)
+        tot_liquido += tot_amb
+
+        # Linha Ambiente
+        ws.cell(row=row_idx, column=1, value=f"{ordem_amb}- {amb['nome'].upper()}").font = font_bold
+        ws.cell(row=row_idx, column=1).fill = fill_amb
+        ws.cell(row=row_idx, column=2, value="Ambiente").font = font_bold
+        ws.cell(row=row_idx, column=2).fill = fill_amb
+        
+        c_val = ws.cell(row=row_idx, column=3, value=tot_amb)
+        c_val.font = font_bold
+        c_val.number_format = 'R$ #,##0.00'
+        c_val.fill = fill_amb
+        c_val.alignment = align_right
+        row_idx += 1
+
+        if amb.get('especificacoes'):
+            ws.cell(row=row_idx, column=1, value=f"Especificações: {amb['especificacoes']}").alignment = align_left
+            row_idx += 1
+
+        for item in itens_normais:
+            ws.cell(row=row_idx, column=1, value=f"- {item['descricao']}").alignment = align_left
+            ws.cell(row=row_idx, column=2, value="Normal")
+            c_v = ws.cell(row=row_idx, column=3, value=float(item['valor']))
+            c_v.number_format = 'R$ #,##0.00'
+            c_v.alignment = align_right
+            row_idx += 1
+
+        for item in itens_opcionais:
+            tot_opcionais += float(item['valor'])
+            ws.cell(row=row_idx, column=1, value=f"- [OPCIONAL] {item['descricao']}").alignment = align_left
+            ws.cell(row=row_idx, column=2, value="Opcional")
+            c_v = ws.cell(row=row_idx, column=3, value=float(item['valor']))
+            c_v.number_format = 'R$ #,##0.00'
+            c_v.alignment = align_right
+            row_idx += 1
+        
+        row_idx += 1
+
+    # Totais
+    ws.cell(row=row_idx, column=2, value="Total Líquido:").font = font_bold
+    c_tl = ws.cell(row=row_idx, column=3, value=tot_liquido)
+    c_tl.font = font_bold
+    c_tl.number_format = 'R$ #,##0.00'
+    c_tl.alignment = align_right
+    row_idx += 1
+
+    ws.cell(row=row_idx, column=2, value="Total c/ Opcionais:").font = font_bold
+    c_to = ws.cell(row=row_idx, column=3, value=(tot_liquido + tot_opcionais))
+    c_to.font = font_bold
+    c_to.number_format = 'R$ #,##0.00'
+    c_to.alignment = align_right
+    row_idx += 2
+
+    # Condições
+    ws.cell(row=row_idx, column=1, value=f"Prazo de Entrega: {cliente_info.get('prazo_entrega', '')}").font = font_bold
+    row_idx += 1
+    ws.cell(row=row_idx, column=1, value=f"Condição de Pagamento: {cliente_info.get('condicoes_pagamento', '')}").font = font_bold
+    row_idx += 1
+    ws.cell(row=row_idx, column=1, value=f"Observações: {cliente_info.get('observacoes', '')}")
+
+    ws.column_dimensions['A'].width = 65
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 20
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
 # -----------------------------------------------------------------------------
-# 3. INTERFACE STREAMLIT
+# 3. CONTROLE DE AUTENTICAÇÃO E SESSÃO
+# -----------------------------------------------------------------------------
+if 'autenticado' not in st.session_state:
+    st.session_state.autenticado = False
+
+def tela_login():
+    st.markdown("<h2 style='text-align: center;'>🔐 Acesso ao Sistema Laurenti Móveis</h2>", unsafe_allow_text=True)
+    st.markdown("<p style='text-align: center; color: #64748B;'>Digite a senha de segurança para continuar</p>", unsafe_allow_text=True)
+    
+    col_l1, col_l2, col_l3 = st.columns([1, 1.2, 1])
+    with col_l2:
+        with st.form("form_login"):
+            senha_input = st.text_input("Senha", type="password", placeholder="Digite sua senha")
+            btn_entrar = st.form_submit_button("🔓 Entrar no Sistema", use_container_width=True)
+            
+            if btn_entrar:
+                config = get_config()
+                if hash_senha(senha_input) == config.get('senha_hash'):
+                    st.session_state.autenticado = True
+                    st.success("Acesso liberado!")
+                    st.rerun()
+                else:
+                    st.error("Senha incorreta. Tente novamente.")
+
+if not st.session_state.autenticado:
+    tela_login()
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# 4. INTERFACE PRINCIPAL STREAMLIT
 # -----------------------------------------------------------------------------
 if 'ambientes' not in st.session_state:
     st.session_state.ambientes = []
@@ -446,7 +752,6 @@ if 'confirm_del' not in st.session_state:
 if 'form_version' not in st.session_state:
     st.session_state.form_version = 1
 
-# Estado de expansão dos ambientes (Padrão: Expandidos)
 if 'expand_ambientes' not in st.session_state:
     st.session_state.expand_ambientes = True
 
@@ -469,6 +774,14 @@ def reseta_formulario_limpo():
     
     st.session_state.expand_ambientes = True
     st.session_state.form_version += 1
+
+# Botão Sair na Barra Lateral
+st.sidebar.markdown("### 👤 Usuário Autenticado")
+if st.sidebar.button("🚪 Sair / Bloquear Sistema", use_container_width=True):
+    st.session_state.autenticado = False
+    st.rerun()
+
+st.sidebar.markdown("---")
 
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
 
@@ -568,7 +881,6 @@ if menu == "➕ Novo / Editar Orçamento":
 
     st.markdown("---")
     
-    # Cabeçalho da seção com botão único alternável de expandir/contrair
     col_amb_head1, col_amb_head2 = st.columns([3, 1])
     col_amb_head1.subheader("🛋️ Ambientes e Subitens")
     
@@ -593,7 +905,6 @@ if menu == "➕ Novo / Editar Orçamento":
                     'total_ambiente': 0.0,
                     'itens': []
                 })
-                # Força a abertura para preencher subitens imediatamente
                 st.session_state.expand_ambientes = True
                 st.rerun()
 
@@ -726,6 +1037,7 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn.commit()
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso!")
 
+    # Opções de Exportação em PDF, Word e Excel
     with col_btn2:
         cli_info = {
             'proposta_num': prop_formatted,
@@ -742,12 +1054,33 @@ if menu == "➕ Novo / Editar Orçamento":
             'condicoes_pagamento': condicoes_pagamento,
             'observacoes': observacoes
         }
+        
+        c_exp1, c_exp2, c_exp3 = st.columns(3)
+        
         pdf_bytes = gerar_pdf_orcamento(cli_info, st.session_state.ambientes)
-        st.download_button(
-            label="📄 Exportar Orçamento em PDF",
+        c_exp1.download_button(
+            label="📄 PDF",
             data=pdf_bytes,
             file_name=f"Orcamento_{prop_formatted}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.pdf",
             mime="application/pdf",
+            use_container_width=True
+        )
+
+        word_bytes = gerar_word_orcamento(cli_info, st.session_state.ambientes)
+        c_exp2.download_button(
+            label="📝 Word",
+            data=word_bytes,
+            file_name=f"Orcamento_{prop_formatted}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+
+        excel_bytes = gerar_excel_orcamento(cli_info, st.session_state.ambientes)
+        c_exp3.download_button(
+            label="📊 Excel",
+            data=excel_bytes,
+            file_name=f"Orcamento_{prop_formatted}_{cliente.replace(' ', '_') if cliente else 'Cliente'}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
@@ -758,17 +1091,35 @@ elif menu == "📋 Orçamentos Salvos":
     c = conn.cursor()
     
     status_list = get_status_list()
-    filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos"] + status_list)
     
-    if filtro_status == "Todos":
-        df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos ORDER BY id DESC", conn)
-    else:
-        df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos WHERE status = ? ORDER BY id DESC", conn, params=(filtro_status,))
+    # Filtros e Barra de Pesquisa
+    c_f1, c_f2 = st.columns([1, 2])
+    with c_f1:
+        filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos"] + status_list)
+    with c_f2:
+        termo_busca = st.text_input("🔍 Pesquisar por Cliente, Nº Proposta ou Consultor", placeholder="Digite o nome, número ou consultor...").strip()
+
+    # Query dinâmica com filtro e busca
+    query = "SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos WHERE 1=1"
+    params = []
+
+    if filtro_status != "Todos":
+        query += " AND status = ?"
+        params.append(filtro_status)
+
+    if termo_busca:
+        query += " AND (cliente LIKE ? OR CAST(proposta_num AS TEXT) LIKE ? OR consultor LIKE ?)"
+        busca_param = f"%{termo_busca}%"
+        params.extend([busca_param, busca_param, busca_param])
+
+    query += " ORDER BY id DESC"
+    
+    df_orc = pd.read_sql_query(query, conn, params=params)
     
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
             with st.container():
-                col_a1, col_a2, col_a3, col_a4, col_a5, col_a6, col_a7 = st.columns([1.2, 2.2, 1.5, 1.2, 1.0, 1.0, 1.0])
+                col_a1, col_a2, col_a3, col_a4, col_a5, col_a6, col_a7, col_a8 = st.columns([1.0, 2.0, 1.2, 0.9, 0.9, 0.7, 0.7, 0.7])
                 
                 p_fmt = f"{int(row['proposta_num']):04d}" if str(row['proposta_num']).isdigit() else str(row['proposta_num'])
                 status_atual = row.get('status', status_list[0] if status_list else 'Em Análise')
@@ -777,7 +1128,7 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR
+                # Editar
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -822,7 +1173,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # BOTÃO CLONAR
+                # Clonar
                 if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
                     c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                     o = dict(c.fetchone())
@@ -867,7 +1218,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                # PDF Direto na Lista
+                # Puxa dados salvos para exportação direta na lista
                 c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
                 o_saved = dict(c.fetchone())
                 ambs_saved = []
@@ -887,7 +1238,9 @@ elif menu == "📋 Orçamentos Salvos":
                     'dias_validade': o_saved['dias_validade'], 'validade': o_saved['validade'], 'prazo_entrega': o_saved['prazo_entrega'],
                     'condicoes_pagamento': o_saved['condicoes_pagamento'], 'observacoes': o_saved['observacoes']
                 }
+
                 pdf_saved_bytes = gerar_pdf_orcamento(cli_saved_info, ambs_saved)
+                word_saved_bytes = gerar_word_orcamento(cli_saved_info, ambs_saved)
                 
                 col_a6.download_button(
                     label="📄 PDF",
@@ -897,7 +1250,15 @@ elif menu == "📋 Orçamentos Salvos":
                     key=f"btn_pdf_orc_{row['id']}"
                 )
 
-                if col_a7.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
+                col_a7.download_button(
+                    label="📝 DOCX",
+                    data=word_saved_bytes,
+                    file_name=f"Orcamento_{p_fmt}_{o_saved['cliente'].replace(' ', '_')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key=f"btn_word_orc_{row['id']}"
+                )
+
+                if col_a8.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
                     st.session_state.confirm_del = f"orc_{row['id']}"
 
                 if st.session_state.confirm_del == f"orc_{row['id']}":
@@ -914,11 +1275,11 @@ elif menu == "📋 Orçamentos Salvos":
 
                 st.markdown("---")
     else:
-        st.info("Nenhum orçamento cadastrado para o filtro selecionado.")
+        st.info("Nenhum orçamento encontrado com os filtros e busca atuais.")
 
 # --- ABA 3: CONFIGURAÇÕES E LOGO ---
 elif menu == "⚙️ Configurações":
-    st.subheader("⚙️ Configurações da Empresa, Consultores e Status")
+    st.subheader("⚙️ Configurações da Empresa, Consultores, Status e Segurança")
     conn = get_connection()
     c = conn.cursor()
     
@@ -957,6 +1318,27 @@ elif menu == "⚙️ Configurações":
             conn.commit()
             st.success("Dados da empresa salvos!")
             st.rerun()
+
+    st.markdown("---")
+    
+    # Alterar Senha
+    st.markdown("#### 🔑 Alterar Senha do Sistema")
+    with st.form("form_alterar_senha"):
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            nova_senha = st.text_input("Nova Senha", type="password")
+        with col_p2:
+            confirma_senha = st.text_input("Confirmar Nova Senha", type="password")
+            
+        if st.form_submit_button("🔐 Atualizar Senha"):
+            if not nova_senha:
+                st.error("A senha não pode ser vazia.")
+            elif nova_senha != confirma_senha:
+                st.error("As senhas digitadas não coincidem.")
+            else:
+                c.execute("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha(nova_senha),))
+                conn.commit()
+                st.success("Senha do sistema alterada com sucesso!")
 
     st.markdown("---")
     col_cfg1, col_cfg2 = st.columns(2)
