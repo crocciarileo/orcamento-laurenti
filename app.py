@@ -295,7 +295,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
         except Exception:
             pass
 
-    # CORREÇÃO 3: Telefone e E-mail em linhas separadas
     cli_text = f"""
     <b>Cliente:</b> {cliente_info.get('cliente', '')}<br/>
     <b>Contato:</b> {cliente_info.get('contato', '')}<br/>
@@ -387,12 +386,10 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_itens)
     story.append(Spacer(1, 10))
 
-    # CORREÇÃO 2: Layout de Totais e Condições separados e bem alinhados
     tot_com_opc = tot_liquido + tot_opcionais
     tot_liquido_str = f"R$ {tot_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     tot_com_opc_str = f"R$ {tot_com_opc:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    # Tabela 1: Caixa de Totais à Direita
     totais_box_text = f"""
     <font size=9 color='#64748B'><b>Total Líquido:</b></font> &nbsp;&nbsp;&nbsp;&nbsp; <font size=11 color='#0F172A'><b>{tot_liquido_str}</b></font><br/>
     <font size=8 color='#64748B'>Total c/ Opcionais:</font> &nbsp;&nbsp;&nbsp;&nbsp; <font size=10 color='#D97706'><b>{tot_com_opc_str}</b></font>
@@ -411,7 +408,6 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story.append(t_totais)
     story.append(Spacer(1, 8))
 
-    # Tabela 2: Detalhes e Observações em Largura Total Abaixo
     obs_fmt = cliente_info.get('observacoes', '').replace('\n', '<br/>')
     cond_text = f"""
     <b>Prazo de Entrega:</b> {cliente_info.get('prazo_entrega', '')}<br/>
@@ -450,6 +446,10 @@ if 'confirm_del' not in st.session_state:
 if 'form_version' not in st.session_state:
     st.session_state.form_version = 1
 
+# Estado de expansão dos ambientes (Padrão: Expandidos)
+if 'expand_ambientes' not in st.session_state:
+    st.session_state.expand_ambientes = True
+
 def reseta_formulario_limpo():
     ultimas_cond = get_ultimas_condicoes()
     st.session_state.ambientes = []
@@ -467,6 +467,7 @@ def reseta_formulario_limpo():
     st.session_state.cli_prop = get_proxima_proposta()
     st.session_state.cli_status = ultimas_cond['status']
     
+    st.session_state.expand_ambientes = True
     st.session_state.form_version += 1
 
 opcoes_menu = ["➕ Novo / Editar Orçamento", "📋 Orçamentos Salvos", "⚙️ Configurações"]
@@ -566,7 +567,15 @@ if menu == "➕ Novo / Editar Orçamento":
         st.session_state.cli_obs = observacoes
 
     st.markdown("---")
-    st.subheader("🛋️ Ambientes e Subitens")
+    
+    # Cabeçalho da seção com botão único alternável de expandir/contrair
+    col_amb_head1, col_amb_head2 = st.columns([3, 1])
+    col_amb_head1.subheader("🛋️ Ambientes e Subitens")
+    
+    btn_toggle_text = "📁 Contrair Todos os Ambientes" if st.session_state.expand_ambientes else "📂 Expandir Todos os Ambientes"
+    if col_amb_head2.button(btn_toggle_text, use_container_width=True):
+        st.session_state.expand_ambientes = not st.session_state.expand_ambientes
+        st.rerun()
 
     with st.form("form_novo_ambiente", clear_on_submit=True):
         col_amb1, col_amb2 = st.columns([2, 3])
@@ -584,21 +593,21 @@ if menu == "➕ Novo / Editar Orçamento":
                     'total_ambiente': 0.0,
                     'itens': []
                 })
+                # Força a abertura para preencher subitens imediatamente
+                st.session_state.expand_ambientes = True
                 st.rerun()
 
     if st.session_state.ambientes:
         for idx_amb, amb in enumerate(st.session_state.ambientes):
             ordem_amb = idx_amb + 1
             
-            # CORREÇÃO 1: Garante ID único permanente em cada subitem para evitar troca de valores na ordenação visual
             for item in amb['itens']:
                 if 'id' not in item:
                     item['id'] = str(uuid.uuid4())
 
-            # Ordena visualmente (Normais primeiro, Opcionais depois)
             amb['itens'] = sorted(amb['itens'], key=lambda x: x['eh_opcional'])
 
-            with st.expander(f"🛋️ **Item {ordem_amb}: {amb['nome'].upper()}** — Total: R$ {amb['total_ambiente']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), expanded=True):
+            with st.expander(f"🛋️ **Item {ordem_amb}: {amb['nome'].upper()}** — Total: R$ {amb['total_ambiente']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), expanded=st.session_state.expand_ambientes):
                 
                 col_e1, col_e2, col_e3 = st.columns([2, 3, 1])
                 with col_e1:
@@ -786,6 +795,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_obs = o['observacoes'] or ""
                     st.session_state.cli_status = o.get('status', status_list[0] if status_list else 'Em Análise')
                     
+                    st.session_state.expand_ambientes = True
                     st.session_state.form_version += 1
                     
                     ambs_db = []
@@ -830,6 +840,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_obs = o['observacoes'] or ""
                     st.session_state.cli_status = status_list[0] if status_list else "Em Análise"
                     
+                    st.session_state.expand_ambientes = True
                     st.session_state.form_version += 1
                     
                     ambs_db = []
