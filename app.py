@@ -80,9 +80,16 @@ def init_db():
             condicoes_pagamento TEXT,
             observacoes TEXT,
             total_liquido REAL DEFAULT 0,
-            total_com_opcionais REAL DEFAULT 0
+            total_com_opcionais REAL DEFAULT 0,
+            status TEXT DEFAULT 'Em Análise'
         )
     """)
+    
+    # Migração automática caso a coluna status não exista em bases antigas
+    c.execute("PRAGMA table_info(orcamentos)")
+    colunas = [col[1] for col in c.fetchall()]
+    if 'status' not in colunas:
+        c.execute("ALTER TABLE orcamentos ADD COLUMN status TEXT DEFAULT 'Em Análise'")
 
     # Ambientes
     c.execute("""
@@ -216,14 +223,12 @@ def gerar_pdf_orcamento(cliente_info, ambientes_list):
     story = []
     styles = getSampleStyleSheet()
     
-    # Entrelinha aumentada (leading=13) para leitura mais confortável
     body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=8.5, leading=13, textColor=colors.HexColor('#222222'))
     body_bold = ParagraphStyle('BodyBold', parent=body_style, fontName='Helvetica-Bold')
     right_bold = ParagraphStyle('RightBold', parent=body_bold, alignment=2)
     header_title = ParagraphStyle('HeaderTitle', parent=body_bold, fontSize=9, textColor=colors.HexColor('#1E293B'))
     amb_title_style = ParagraphStyle('AmbTitleStyle', parent=body_bold, fontSize=9.5, textColor=colors.HexColor('#0F172A'))
 
-    # Cálculo proporcional da logo usando PIL
     col_logo = Paragraph("<b>LAURENTI MÓVEIS</b>", body_bold)
     logo_p = config.get('logo_path', '')
     if logo_p and os.path.exists(logo_p):
@@ -406,19 +411,20 @@ if menu == "➕ Novo / Editar Orçamento":
         st.session_state.cli_nome = ""
         st.session_state.cli_contato = ""
         st.session_state.cli_tel = ""
-        st.session_state.cli_email = "" # Reseta email limpo
+        st.session_state.cli_email = ""
         st.session_state.cli_tipo = "Residencial"
         st.session_state.cli_consultor = ultimas_cond['consultor']
         st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
         st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
         st.session_state.cli_obs = ultimas_cond['observacoes']
         st.session_state.cli_prop = get_proxima_proposta()
+        st.session_state.cli_status = "Em Análise"
         st.rerun()
 
     prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
     prop_formatted = f"{int(prop_num_atual):04d}" if str(prop_num_atual).isdigit() else str(prop_num_atual)
 
-    with st.expander("👤 Dados do Cliente e Proposta", expanded=True):
+    with st.expander("👤 Dados do Cliente, Status e Proposta", expanded=True):
         col1, col2, col3 = st.columns(3)
         with col1:
             cliente = st.text_input("Cliente *", value=st.session_state.get('cli_nome', ''), placeholder="Nome da pessoa ou empresa", key="in_cli_nome")
@@ -445,6 +451,12 @@ if menu == "➕ Novo / Editar Orçamento":
             st.session_state.cli_email = email
             
             data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key="in_cli_data")
+            
+            status_opts = ["Em Análise", "Aprovado", "Em Produção", "Perdido"]
+            status_val = st.session_state.get('cli_status', 'Em Análise')
+            idx_status = status_opts.index(status_val) if status_val in status_opts else 0
+            status_orcamento = st.selectbox("Status Comercial", status_opts, index=idx_status, key="in_cli_status")
+            st.session_state.cli_status = status_orcamento
             
         with col3:
             st.text_input("Proposta Nº (Automático)", value=prop_formatted, disabled=True)
@@ -573,21 +585,20 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn = get_connection()
                 c = conn.cursor()
                 
-                # Trata proposta_num de forma limpa como int
                 num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
 
                 if st.session_state.edit_index:
                     orc_id = st.session_state.edit_index
                     c.execute("DELETE FROM ambientes WHERE orcamento_id = ?", (orc_id,))
                     c.execute("""
-                        UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?
+                        UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?, status=?
                         WHERE id=?
-                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, orc_id))
+                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento, orc_id))
                 else:
                     c.execute("""
-                        INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais))
+                        INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
                     orc_id = c.lastrowid
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
@@ -606,7 +617,6 @@ if menu == "➕ Novo / Editar Orçamento":
                 conn.commit()
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso!")
 
-    # Exportação PDF garantida
     with col_btn2:
         cli_info = {
             'proposta_num': prop_formatted,
@@ -638,19 +648,27 @@ elif menu == "📋 Orçamentos Salvos":
     conn = get_connection()
     c = conn.cursor()
     
-    df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido FROM orcamentos ORDER BY id DESC", conn)
+    # Filtro rápido por status para pipeline comercial
+    filtro_status = st.selectbox("Filtrar por Status Comercial", ["Todos", "Em Análise", "Aprovado", "Em Produção", "Perdido"])
+    
+    if filtro_status == "Todos":
+        df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos ORDER BY id DESC", conn)
+    else:
+        df_orc = pd.read_sql_query("SELECT id, proposta_num, cliente, consultor, data, total_liquido, status FROM orcamentos WHERE status = ? ORDER BY id DESC", conn, params=(filtro_status,))
     
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
             with st.container():
-                col_a1, col_a2, col_a3, col_a4, col_a5, col_a6 = st.columns([1.5, 2.5, 1.8, 1.2, 1.2, 1.2])
+                col_a1, col_a2, col_a3, col_a4, col_a5, col_a6, col_a7 = st.columns([1.2, 2.2, 1.5, 1.2, 1.0, 1.0, 1.0])
                 
                 p_fmt = f"{int(row['proposta_num']):04d}" if str(row['proposta_num']).isdigit() else str(row['proposta_num'])
-                col_a1.write(f"**Proposta: #{p_fmt}**")
-                col_a2.write(f"**{row['cliente']}** ({row['consultor']})")
+                status_atual = row.get('status', 'Em Análise')
+                
+                col_a1.write(f"**#{p_fmt}**")
+                col_a2.write(f"**{row['cliente']}**\n\n`{status_atual}`")
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
-                # BOTÃO EDITAR: Puxa todos os dados e joga para o formulário
+                # BOTÃO EDITAR
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
                     st.session_state.edit_index = row['id']
                     
@@ -667,6 +685,47 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.cli_prazo = o[11]
                     st.session_state.cli_cond = o[12]
                     st.session_state.cli_obs = o[13]
+                    st.session_state.cli_status = o[16] if len(o) > 16 and o[16] else "Em Análise"
+                    
+                    ambs_db = []
+                    c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
+                    for amb_row in c.fetchall():
+                        itens_db = []
+                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_row[0],))
+                        for item_row in c.fetchall():
+                            itens_db.append({
+                                'descricao': item_row[0],
+                                'valor': item_row[1],
+                                'eh_opcional': bool(item_row[2])
+                            })
+                        ambs_db.append({
+                            'nome': amb_row[1],
+                            'especificacoes': amb_row[2],
+                            'total_ambiente': amb_row[3],
+                            'itens': itens_db
+                        })
+                    st.session_state.ambientes = ambs_db
+                    st.session_state.radio_menu = "➕ Novo / Editar Orçamento"
+                    st.rerun()
+
+                # BOTÃO DUPLICAR / CLONAR ORÇAMENTO
+                if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
+                    st.session_state.edit_index = None  # Novo orçamento
+                    st.session_state.cli_prop = get_proxima_proposta()
+                    
+                    c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
+                    o = c.fetchone()
+                    
+                    st.session_state.cli_nome = f"{o[2]} (Cópia)"
+                    st.session_state.cli_contato = o[3]
+                    st.session_state.cli_tipo = o[4]
+                    st.session_state.cli_tel = o[5]
+                    st.session_state.cli_email = o[6]
+                    st.session_state.cli_consultor = o[7]
+                    st.session_state.cli_prazo = o[11]
+                    st.session_state.cli_cond = o[12]
+                    st.session_state.cli_obs = o[13]
+                    st.session_state.cli_status = "Em Análise"
                     
                     ambs_db = []
                     c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
@@ -709,7 +768,7 @@ elif menu == "📋 Orçamentos Salvos":
                 }
                 pdf_saved_bytes = gerar_pdf_orcamento(cli_saved_info, ambs_saved)
                 
-                col_a5.download_button(
+                col_a6.download_button(
                     label="📄 PDF",
                     data=pdf_saved_bytes,
                     file_name=f"Orcamento_{p_fmt}_{o_saved[2].replace(' ', '_')}.pdf",
@@ -717,7 +776,7 @@ elif menu == "📋 Orçamentos Salvos":
                     key=f"btn_pdf_orc_{row['id']}"
                 )
 
-                if col_a6.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
+                if col_a7.button("🗑️ Excluir", key=f"btn_del_orc_{row['id']}"):
                     st.session_state.confirm_del = f"orc_{row['id']}"
 
                 if st.session_state.confirm_del == f"orc_{row['id']}":
@@ -734,7 +793,7 @@ elif menu == "📋 Orçamentos Salvos":
 
                 st.markdown("---")
     else:
-        st.info("Nenhum orçamento cadastrado.")
+        st.info("Nenhum orçamento cadastrado para o filtro selecionado.")
 
 # --- ABA 3: CONFIGURAÇÕES E LOGO ---
 elif menu == "⚙️ Configurações":
