@@ -1,6 +1,7 @@
 import streamlit as st
 import sqlite3
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import pandas as pd
 from datetime import datetime, timedelta
@@ -35,43 +36,86 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS OTIMIZADO (Pool de Conexão com Cache)
+# 1. BANCO DE DADOS E POOL DE CONEXÕES ROBUSTO
 # -----------------------------------------------------------------------------
 def is_postgres():
     return "postgres" in st.secrets
 
-@st.cache_resource(ttl=300)  # Mantém a conexão ativa em memória por 5 minutos
-def get_persistent_connection():
-    if is_postgres():
-        pg_secrets = st.secrets["postgres"]
-        if "url" in pg_secrets:
-            return psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor)
-        else:
-            return psycopg2.connect(
-                host=pg_secrets["host"],
-                port=str(pg_secrets.get("port", "6543")),
-                dbname=pg_secrets.get("dbname", "postgres"),
-                user=pg_secrets.get("user", "postgres"),
-                password=pg_secrets["password"],
-                sslmode=pg_secrets.get("sslmode", "require"),
-                cursor_factory=RealDictCursor,
-                connect_timeout=10
-            )
+@st.cache_resource
+def get_pg_pool():
+    if not is_postgres():
+        return None
+    
+    pg_secrets = st.secrets["postgres"]
+    
+    # Extrai dados de conexao da URL ou das chaves individuais
+    if "url" in pg_secrets and pg_secrets["url"]:
+        conn_str = pg_secrets["url"]
+        if "sslmode" not in conn_str:
+            conn_str += "?sslmode=require" if "?" not in conn_str else "&sslmode=require"
+        return pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            dsn=conn_str,
+            cursor_factory=RealDictCursor,
+            connect_timeout=10
+        )
     else:
-        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            host=pg_secrets["host"],
+            port=str(pg_secrets.get("port", "6543")),
+            dbname=pg_secrets.get("dbname", "postgres"),
+            user=pg_secrets.get("user", "postgres"),
+            password=pg_secrets["password"],
+            sslmode=pg_secrets.get("sslmode", "require"),
+            cursor_factory=RealDictCursor,
+            connect_timeout=10
+        )
 
 def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False):
     use_pg = is_postgres()
     formatted_query = query.replace('?', '%s') if use_pg else query
 
-    try:
-        conn = get_persistent_connection()
-        if conn.closed != 0:
-            st.cache_resource.clear()
-            conn = get_persistent_connection()
+    if use_pg:
+        pg_pool = get_pg_pool()
+        conn = None
+        try:
+            conn = pg_pool.getconn()
+            # Testa se a conexão está ativa
+            if conn.closed != 0:
+                pg_pool.putconn(conn, close=True)
+                conn = pg_pool.getconn()
+                
+            cursor = conn.cursor()
+            cursor.execute(formatted_query, params)
             
+            result = None
+            if fetchone:
+                row = cursor.fetchone()
+                result = dict(row) if row else None
+            elif fetchall:
+                rows = cursor.fetchall()
+                result = [dict(r) for r in rows]
+                
+            if commit:
+                conn.commit()
+                
+            cursor.close()
+            pg_pool.putconn(conn)
+            return result
+        except Exception as e:
+            if conn:
+                try:
+                    conn.rollback()
+                    pg_pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+            raise e
+    else:
+        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(formatted_query, params)
         
@@ -87,37 +131,18 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False
             conn.commit()
             
         cursor.close()
-        return result
-    except Exception:
-        # Se a conexão expirou por inatividade, reconecta automaticamente
-        st.cache_resource.clear()
-        conn = get_persistent_connection()
-        cursor = conn.cursor()
-        cursor.execute(formatted_query, params)
-        result = None
-        if fetchone:
-            row = cursor.fetchone()
-            result = dict(row) if row else None
-        elif fetchall:
-            rows = cursor.fetchall()
-            result = [dict(r) for r in rows]
-        if commit:
-            conn.commit()
-        cursor.close()
+        conn.close()
         return result
 
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
 
 def init_db():
-    conn = get_persistent_connection()
-    c = conn.cursor()
     use_pg = is_postgres()
-    
     serial_pk = "SERIAL PRIMARY KEY" if use_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
     # 1. Configurações da Empresa
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS config_empresa (
             id INTEGER PRIMARY KEY,
             nome_empresa TEXT,
@@ -130,63 +155,54 @@ def init_db():
             logo_largura REAL DEFAULT 5.0,
             senha_hash TEXT
         )
-    """)
+    """, commit=True)
     
-    c.execute("SELECT COUNT(*) as count FROM config_empresa")
-    res_count = c.fetchone()
-    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    res_count = execute_query("SELECT COUNT(*) as count FROM config_empresa", fetchone=True)
+    count_val = res_count['count'] if res_count else 0
     
     if count_val == 0:
-        c.execute("""
-            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
-            VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
-                    'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
-                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, %s)
-        """ if use_pg else """
+        execute_query("""
             INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
             VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
                     'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, ?)
-        """, (hash_senha("laurenti2026"),))
+        """, (hash_senha("laurenti2026"),), commit=True)
 
     # 2. Status Comercial
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS status_comercial (
             id {serial_pk},
             nome TEXT UNIQUE NOT NULL
         )
-    """)
+    """, commit=True)
     
-    c.execute("SELECT COUNT(*) as count FROM status_comercial")
-    res_count = c.fetchone()
-    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    res_count = execute_query("SELECT COUNT(*) as count FROM status_comercial", fetchone=True)
+    count_val = res_count['count'] if res_count else 0
     
     if count_val == 0:
-        status_iniciais = ["Em Análise", "Aprovado", "Em Produção", "Perdido"]
-        for st_name in status_iniciais:
+        for st_name in ["Em Análise", "Aprovado", "Em Produção", "Perdido"]:
             try:
-                c.execute("INSERT INTO status_comercial (nome) VALUES (%s)" if use_pg else "INSERT INTO status_comercial (nome) VALUES (?)", (st_name,))
+                execute_query("INSERT INTO status_comercial (nome) VALUES (?)", (st_name,), commit=True)
             except Exception:
                 pass
 
     # 3. Consultores
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS consultores (
             id {serial_pk},
             nome TEXT NOT NULL
         )
-    """)
+    """, commit=True)
     
-    c.execute("SELECT COUNT(*) as count FROM consultores")
-    res_count = c.fetchone()
-    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    res_count = execute_query("SELECT COUNT(*) as count FROM consultores", fetchone=True)
+    count_val = res_count['count'] if res_count else 0
     
     if count_val == 0:
         for cons_name in ["KATIA LUCIA LOURENCO", "Sem Consultor"]:
-            c.execute("INSERT INTO consultores (nome) VALUES (%s)" if use_pg else "INSERT INTO consultores (nome) VALUES (?)", (cons_name,))
+            execute_query("INSERT INTO consultores (nome) VALUES (?)", (cons_name,), commit=True)
 
     # 4. Orçamentos
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS orcamentos (
             id {serial_pk},
             proposta_num INTEGER,
@@ -206,10 +222,10 @@ def init_db():
             total_com_opcionais REAL DEFAULT 0,
             status TEXT DEFAULT 'Em Análise'
         )
-    """)
+    """, commit=True)
 
     # 5. Ambientes
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS ambientes (
             id {serial_pk},
             orcamento_id INTEGER,
@@ -219,10 +235,10 @@ def init_db():
             total_ambiente REAL DEFAULT 0,
             FOREIGN KEY(orcamento_id) REFERENCES orcamentos(id) ON DELETE CASCADE
         )
-    """)
+    """, commit=True)
 
     # 6. Itens / Subitens
-    c.execute(f"""
+    execute_query(f"""
         CREATE TABLE IF NOT EXISTS itens (
             id {serial_pk},
             ambiente_id INTEGER,
@@ -232,10 +248,7 @@ def init_db():
             eh_opcional INTEGER DEFAULT 0,
             FOREIGN KEY(ambiente_id) REFERENCES ambientes(id) ON DELETE CASCADE
         )
-    """)
-    
-    conn.commit()
-    c.close()
+    """, commit=True)
 
 init_db()
 
@@ -1160,8 +1173,6 @@ if menu == "➕ Novo / Editar Orçamento":
                 num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
                 
                 use_pg = is_postgres()
-                conn = get_persistent_connection()
-                c = conn.cursor()
 
                 if st.session_state.edit_index:
                     orc_id = st.session_state.edit_index
@@ -1174,43 +1185,44 @@ if menu == "➕ Novo / Editar Orçamento":
                     execute_query(q_up, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento, orc_id), commit=True)
                 else:
                     if use_pg:
-                        c.execute("""
+                        row_ins = execute_query("""
                             INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-                        """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
-                        orc_id = c.fetchone()['id']
-                        conn.commit()
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+                        """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento), fetchone=True, commit=True)
+                        orc_id = row_ins['id']
                     else:
-                        c.execute("""
+                        conn_sq = sqlite3.connect('orcamentos.db')
+                        c_sq = conn_sq.cursor()
+                        c_sq.execute("""
                             INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
-                        orc_id = c.lastrowid
-                        conn.commit()
+                        orc_id = c_sq.lastrowid
+                        conn_sq.commit()
+                        conn_sq.close()
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
                     if use_pg:
-                        c.execute("""
+                        row_amb = execute_query("""
                             INSERT INTO ambientes (orcamento_id, ordem, nome_ambiente, especificacoes, total_ambiente)
-                            VALUES (%s, %s, %s, %s, %s) RETURNING id
-                        """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']))
-                        amb_id = c.fetchone()['id']
-                        conn.commit()
+                            VALUES (?, ?, ?, ?, ?) RETURNING id
+                        """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']), fetchone=True, commit=True)
+                        amb_id = row_amb['id']
                     else:
-                        c.execute("""
+                        conn_sq = sqlite3.connect('orcamentos.db')
+                        c_sq = conn_sq.cursor()
+                        c_sq.execute("""
                             INSERT INTO ambientes (orcamento_id, ordem, nome_ambiente, especificacoes, total_ambiente)
                             VALUES (?, ?, ?, ?, ?)
                         """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']))
-                        amb_id = c.lastrowid
-                        conn.commit()
+                        amb_id = c_sq.lastrowid
+                        conn_sq.commit()
+                        conn_sq.close()
                     
                     for idx_i, item in enumerate(amb['itens']):
-                        q_it = "INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (%s, %s, %s, %s, %s)" if use_pg else "INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (?, ?, ?, ?, ?)"
-                        c.execute(q_it, (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0))
-                        conn.commit()
+                        execute_query("INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (?, ?, ?, ?, ?)", (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0), commit=True)
                 
-                c.close()
-                st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados remoto!")
+                st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados!")
 
     with col_btn2:
         cli_info = {
