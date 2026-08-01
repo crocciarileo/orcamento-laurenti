@@ -34,7 +34,7 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS (Execução Direta e Rápida)
+# 1. BANCO DE DADOS (Execução Sob Demanda - Sem Bloqueio na Interface)
 # -----------------------------------------------------------------------------
 def is_postgres():
     return "postgres" in st.secrets
@@ -47,7 +47,7 @@ def get_db_connection():
         else:
             return psycopg2.connect(
                 host=pg["host"],
-                port=str(pg.get("port", "5432")),  # Tenta porta 5432 direta se 6543 estiver lenta
+                port=str(pg.get("port", "5432")),
                 dbname=pg.get("dbname", "postgres"),
                 user=pg["user"],
                 password=pg["password"],
@@ -89,7 +89,9 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
 
-def init_db():
+# Inicialização ÚNICA do banco (Executa apenas 1 vez quando o servidor inicia)
+@st.cache_resource
+def init_db_once():
     use_pg = is_postgres()
     serial_pk = "SERIAL PRIMARY KEY" if use_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
@@ -189,11 +191,12 @@ def init_db():
             FOREIGN KEY(ambiente_id) REFERENCES ambientes(id) ON DELETE CASCADE
         )
     """, commit=True)
+    return True
 
-init_db()
+init_db_once()
 
-# CACHEAR CONSULTAS ESTÁTICAS PARA EVITAR LATÊNCIA
-@st.cache_data(ttl=600)
+# CACHEAR DADOS FIXOS
+@st.cache_data(ttl=3600)
 def get_config():
     row = execute_query("SELECT * FROM config_empresa WHERE id = 1", fetchone=True)
     if row:
@@ -209,14 +212,14 @@ def get_config():
         return row
     return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0, 'senha_hash': hash_senha("laurenti2026")}
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def get_status_list():
     rows = execute_query("SELECT nome FROM status_comercial ORDER BY id ASC", fetchall=True)
     if rows:
         return [r['nome'] for r in rows]
     return ["Em Análise"]
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def get_consultores():
     rows = execute_query("SELECT id, nome FROM consultores ORDER BY nome ASC", fetchall=True)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['id', 'nome'])
@@ -229,28 +232,6 @@ def get_proxima_proposta():
         except ValueError:
             return 1
     return 1
-
-def get_ultimas_condicoes():
-    row = execute_query("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes, status FROM orcamentos ORDER BY id DESC LIMIT 1", fetchone=True)
-    status_disponiveis = get_status_list()
-    default_status = status_disponiveis[0] if status_disponiveis else "Em Análise"
-    
-    if row:
-        st_val = row['status'] if row['status'] in status_disponiveis else default_status
-        return {
-            'consultor': row['consultor'] or 'Sem Consultor', 
-            'prazo_entrega': row['prazo_entrega'] or '120 dias após medições finais.', 
-            'condicoes_pagamento': row['condicoes_pagamento'] or '8 PARCELAS', 
-            'observacoes': row['observacoes'] or 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm',
-            'status': st_val
-        }
-    return {
-        'consultor': 'Sem Consultor', 
-        'prazo_entrega': '120 dias após medições finais.', 
-        'condicoes_pagamento': '8 PARCELAS', 
-        'observacoes': 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm',
-        'status': default_status
-    }
 
 # Canvas Dinâmico para PDF
 class NumberedCanvas(canvas.Canvas):
@@ -712,7 +693,6 @@ def gerar_excel_orcamento(cliente_info, ambientes_list):
     font_title = Font(name="Calibri", size=14, bold=True, color="1E293B")
     fill_header = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
     fill_amb = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
-    fill_tot = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
     align_right = Alignment(horizontal="right", vertical="top")
     align_left = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
@@ -867,7 +847,6 @@ if 'expand_ambientes' not in st.session_state:
     st.session_state.expand_ambientes = True
 
 def reseta_formulario_limpo():
-    ultimas_cond = get_ultimas_condicoes()
     st.session_state.ambientes = []
     st.session_state.edit_index = None
     
@@ -876,12 +855,12 @@ def reseta_formulario_limpo():
     st.session_state.cli_tel = ""
     st.session_state.cli_email = ""
     st.session_state.cli_tipo = "Residencial"
-    st.session_state.cli_consultor = ultimas_cond['consultor']
-    st.session_state.cli_prazo = ultimas_cond['prazo_entrega']
-    st.session_state.cli_cond = ultimas_cond['condicoes_pagamento']
-    st.session_state.cli_obs = ultimas_cond['observacoes']
+    st.session_state.cli_consultor = "KATIA LUCIA LOURENCO"
+    st.session_state.cli_prazo = "120 dias após medições finais."
+    st.session_state.cli_cond = "8 PARCELAS"
+    st.session_state.cli_obs = "Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm"
     st.session_state.cli_prop = get_proxima_proposta()
-    st.session_state.cli_status = ultimas_cond['status']
+    st.session_state.cli_status = "Em Análise"
     
     st.session_state.expand_ambientes = True
     st.session_state.form_version += 1
@@ -925,16 +904,15 @@ st.title("🏭 Laurenti Móveis — Gestão de Orçamentos")
 if menu == "➕ Novo / Editar Orçamento":
     st.subheader("Formulário de Orçamento")
     
-    ultimas_cond = get_ultimas_condicoes()
     df_cons = get_consultores()
-    consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["Sem Consultor"]
+    consultores_opts = df_cons['nome'].tolist() if not df_cons.empty else ["KATIA LUCIA LOURENCO", "Sem Consultor"]
     status_opts = get_status_list()
 
     if st.button("✨ Criar Novo Orçamento Limpo"):
         reseta_formulario_limpo()
         st.rerun()
 
-    prop_num_atual = st.session_state.get('cli_prop', get_proxima_proposta())
+    prop_num_atual = st.session_state.get('cli_prop', 1)
     prop_formatted = f"{int(prop_num_atual):04d}" if str(prop_num_atual).isdigit() else str(prop_num_atual)
     
     v = st.session_state.form_version
@@ -953,7 +931,7 @@ if menu == "➕ Novo / Editar Orçamento":
             tipo_contato = st.selectbox("Tipo de Contato", tipo_opts, index=idx_tipo, key=f"in_cli_tipo_{v}")
             st.session_state.cli_tipo = tipo_contato
             
-            cons_val = st.session_state.get('cli_consultor', ultimas_cond['consultor'])
+            cons_val = st.session_state.get('cli_consultor', 'KATIA LUCIA LOURENCO')
             idx_cons_padrao = consultores_opts.index(cons_val) if cons_val in consultores_opts else 0
             consultor = st.selectbox("Consultor *", consultores_opts, index=idx_cons_padrao, key=f"in_cli_cons_{v}")
             st.session_state.cli_consultor = consultor
@@ -967,7 +945,7 @@ if menu == "➕ Novo / Editar Orçamento":
             
             data_atual = st.date_input("Data da Proposta", value=datetime.now().date(), key=f"in_cli_data_{v}")
             
-            status_val = st.session_state.get('cli_status', ultimas_cond['status'])
+            status_val = st.session_state.get('cli_status', 'Em Análise')
             idx_status = status_opts.index(status_val) if status_val in status_opts else 0
             status_orcamento = st.selectbox("Status Comercial", status_opts, index=idx_status, key=f"in_cli_status_{v}")
             st.session_state.cli_status = status_orcamento
@@ -980,13 +958,13 @@ if menu == "➕ Novo / Editar Orçamento":
             
         col_cond1, col_cond2 = st.columns(2)
         with col_cond1:
-            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', ultimas_cond['prazo_entrega']), key=f"in_cli_prazo_{v}")
+            prazo_entrega = st.text_input("Prazo de Entrega", value=st.session_state.get('cli_prazo', '120 dias após medições finais.'), key=f"in_cli_prazo_{v}")
             st.session_state.cli_prazo = prazo_entrega
         with col_cond2:
-            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', ultimas_cond['condicoes_pagamento']), key=f"in_cli_cond_{v}")
+            condicoes_pagamento = st.text_input("Condições de Pagamento", value=st.session_state.get('cli_cond', '8 PARCELAS'), key=f"in_cli_cond_{v}")
             st.session_state.cli_cond = condicoes_pagamento
             
-        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', ultimas_cond['observacoes']), key=f"in_cli_obs_{v}")
+        observacoes = st.text_area("Observações Gerais", value=st.session_state.get('cli_obs', 'Especificações Gerais: MDF externo cores a definir 18mm / MDF interno Branco TX 18mm'), key=f"in_cli_obs_{v}")
         st.session_state.cli_obs = observacoes
 
     st.markdown("---")
@@ -1164,7 +1142,7 @@ if menu == "➕ Novo / Editar Orçamento":
                     for idx_i, item in enumerate(amb['itens']):
                         execute_query("INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (?, ?, ?, ?, ?)", (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0), commit=True)
                 
-                st.cache_data.clear()  # Limpa o cache para que novos orçamentos apareçam na lista
+                st.cache_data.clear()
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados!")
 
     with col_btn2:
