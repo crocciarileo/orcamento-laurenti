@@ -35,69 +35,82 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS E MIGRAÇÕES (PostgreSQL / SQLite Híbrido)
+# 1. BANCO DE DADOS OTIMIZADO (Pool de Conexão com Cache)
 # -----------------------------------------------------------------------------
 def is_postgres():
     return "postgres" in st.secrets
 
-def get_connection():
+@st.cache_resource(ttl=300)  # Mantém a conexão ativa em memória por 5 minutos
+def get_persistent_connection():
     if is_postgres():
         pg_secrets = st.secrets["postgres"]
-        try:
-            if "host" in pg_secrets:
-                conn = psycopg2.connect(
-                    host=pg_secrets["host"],
-                    port=str(pg_secrets.get("port", "6543")),
-                    dbname=pg_secrets.get("dbname", "postgres"),
-                    user=pg_secrets.get("user", "postgres"),
-                    password=pg_secrets["password"],
-                    sslmode=pg_secrets.get("sslmode", "require"),
-                    cursor_factory=RealDictCursor,
-                    connect_timeout=10
-                )
-            else:
-                conn = psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor, connect_timeout=10)
-            return conn
-        except Exception as e:
-            st.error(f"❌ Erro ao conectar ao banco de dados PostgreSQL remoto: {e}")
-            st.stop()
+        if "url" in pg_secrets:
+            return psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor)
+        else:
+            return psycopg2.connect(
+                host=pg_secrets["host"],
+                port=str(pg_secrets.get("port", "6543")),
+                dbname=pg_secrets.get("dbname", "postgres"),
+                user=pg_secrets.get("user", "postgres"),
+                password=pg_secrets["password"],
+                sslmode=pg_secrets.get("sslmode", "require"),
+                cursor_factory=RealDictCursor,
+                connect_timeout=10
+            )
     else:
         conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
 def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False):
-    conn = get_connection()
     use_pg = is_postgres()
-    
-    if use_pg:
-        formatted_query = query.replace('?', '%s')
-    else:
-        formatted_query = query
+    formatted_query = query.replace('?', '%s') if use_pg else query
 
-    cursor = conn.cursor()
-    cursor.execute(formatted_query, params)
-    
-    result = None
-    if fetchone:
-        row = cursor.fetchone()
-        result = dict(row) if row else None
-    elif fetchall:
-        rows = cursor.fetchall()
-        result = [dict(r) for r in rows]
+    try:
+        conn = get_persistent_connection()
+        if conn.closed != 0:
+            st.cache_resource.clear()
+            conn = get_persistent_connection()
+            
+        cursor = conn.cursor()
+        cursor.execute(formatted_query, params)
         
-    if commit:
-        conn.commit()
-        
-    cursor.close()
-    conn.close()
-    return result
+        result = None
+        if fetchone:
+            row = cursor.fetchone()
+            result = dict(row) if row else None
+        elif fetchall:
+            rows = cursor.fetchall()
+            result = [dict(r) for r in rows]
+            
+        if commit:
+            conn.commit()
+            
+        cursor.close()
+        return result
+    except Exception:
+        # Se a conexão expirou por inatividade, reconecta automaticamente
+        st.cache_resource.clear()
+        conn = get_persistent_connection()
+        cursor = conn.cursor()
+        cursor.execute(formatted_query, params)
+        result = None
+        if fetchone:
+            row = cursor.fetchone()
+            result = dict(row) if row else None
+        elif fetchall:
+            rows = cursor.fetchall()
+            result = [dict(r) for r in rows]
+        if commit:
+            conn.commit()
+        cursor.close()
+        return result
 
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
 
 def init_db():
-    conn = get_connection()
+    conn = get_persistent_connection()
     c = conn.cursor()
     use_pg = is_postgres()
     
@@ -223,7 +236,6 @@ def init_db():
     
     conn.commit()
     c.close()
-    conn.close()
 
 init_db()
 
@@ -1148,7 +1160,7 @@ if menu == "➕ Novo / Editar Orçamento":
                 num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
                 
                 use_pg = is_postgres()
-                conn = get_connection()
+                conn = get_persistent_connection()
                 c = conn.cursor()
 
                 if st.session_state.edit_index:
@@ -1198,7 +1210,6 @@ if menu == "➕ Novo / Editar Orçamento":
                         conn.commit()
                 
                 c.close()
-                conn.close()
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados remoto!")
 
     with col_btn2:
