@@ -35,67 +35,100 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS E CONEXÃO ROBUSTA
+# 1. BANCO DE DADOS E POOL DE CONEXÕES ALTA PERFORMANCE
 # -----------------------------------------------------------------------------
 def is_postgres():
     return "postgres" in st.secrets
 
-def get_db_connection():
-    if is_postgres():
-        pg = st.secrets["postgres"]
-        try:
-            if "url" in pg and pg["url"]:
-                conn = psycopg2.connect(pg["url"], cursor_factory=RealDictCursor, connect_timeout=10)
-            else:
-                conn = psycopg2.connect(
-                    host=pg["host"],
-                    port=str(pg.get("port", "6543")),
-                    dbname=pg.get("dbname", "postgres"),
-                    user=pg["user"],
-                    password=pg["password"],
-                    sslmode=pg.get("sslmode", "require"),
-                    cursor_factory=RealDictCursor,
-                    connect_timeout=10
-                )
-            return conn
-        except Exception as e:
-            st.error(f"❌ **Falha ao Conectar ao PostgreSQL Supabase:** {e}")
-            st.info("👉 **Dica:** Verifique se o `user` nas Secrets está no formato `postgres.ID_DO_PROJETO` ao usar a porta 6543 do Pooler.")
-            st.stop()
-    else:
-        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+@st.cache_resource
+def init_connection_pool():
+    if not is_postgres():
+        return None
+    
+    pg = st.secrets["postgres"]
+    try:
+        if "url" in pg and pg["url"]:
+            return pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=pg["url"],
+                cursor_factory=RealDictCursor,
+                connect_timeout=5
+            )
+        else:
+            return pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                host=pg["host"],
+                port=str(pg.get("port", "6543")),
+                dbname=pg.get("dbname", "postgres"),
+                user=pg["user"],
+                password=pg["password"],
+                sslmode=pg.get("sslmode", "require"),
+                cursor_factory=RealDictCursor,
+                connect_timeout=5
+            )
+    except Exception as e:
+        st.error(f"❌ **Erro de conexão ao PostgreSQL Supabase:** {e}")
+        st.stop()
 
 def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False):
     use_pg = is_postgres()
     formatted_query = query.replace('?', '%s') if use_pg else query
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute(formatted_query, params)
+    if use_pg:
+        connection_pool = init_connection_pool()
+        conn = connection_pool.getconn()
+        try:
+            # Garante que a conexão pega do pool não caiu por inatividade
+            if conn.closed != 0:
+                connection_pool.putconn(conn, close=True)
+                conn = connection_pool.getconn()
+
+            with conn.cursor() as cursor:
+                cursor.execute(formatted_query, params)
+                
+                result = None
+                if fetchone:
+                    row = cursor.fetchone()
+                    result = dict(row) if row else None
+                elif fetchall:
+                    rows = cursor.fetchall()
+                    result = [dict(r) for r in rows]
+                    
+                if commit:
+                    conn.commit()
+                    
+                return result
+        except Exception as e:
+            if commit:
+                conn.rollback()
+            raise e
+        finally:
+            # Devolve a conexão ao Pool em vez de destruí-la
+            connection_pool.putconn(conn)
+    else:
+        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         
-        result = None
-        if fetchone:
-            row = cursor.fetchone()
-            result = dict(row) if row else None
-        elif fetchall:
-            rows = cursor.fetchall()
-            result = [dict(r) for r in rows]
-            
-        if commit:
-            conn.commit()
-            
-        return result
-    except Exception as e:
-        if commit:
-            conn.rollback()
-        raise e
-    finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute(formatted_query, params)
+            result = None
+            if fetchone:
+                row = cursor.fetchone()
+                result = dict(row) if row else None
+            elif fetchall:
+                rows = cursor.fetchall()
+                result = [dict(r) for r in rows]
+                
+            if commit:
+                conn.commit()
+                
+            return result
+        finally:
+            cursor.close()
+            conn.close()
 
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
