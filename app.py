@@ -43,19 +43,24 @@ def is_postgres():
 def get_connection():
     if is_postgres():
         pg_secrets = st.secrets["postgres"]
-        if "host" in pg_secrets:
-            conn = psycopg2.connect(
-                host=pg_secrets["host"],
-                port=pg_secrets.get("port", "6543"),
-                dbname=pg_secrets.get("dbname", "postgres"),
-                user=pg_secrets.get("user", "postgres"),
-                password=pg_secrets["password"],
-                sslmode=pg_secrets.get("sslmode", "require"),
-                cursor_factory=RealDictCursor
-            )
-        else:
-            conn = psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor)
-        return conn
+        try:
+            if "host" in pg_secrets:
+                conn = psycopg2.connect(
+                    host=pg_secrets["host"],
+                    port=str(pg_secrets.get("port", "6543")),
+                    dbname=pg_secrets.get("dbname", "postgres"),
+                    user=pg_secrets.get("user", "postgres"),
+                    password=pg_secrets["password"],
+                    sslmode=pg_secrets.get("sslmode", "require"),
+                    cursor_factory=RealDictCursor,
+                    connect_timeout=10
+                )
+            else:
+                conn = psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor, connect_timeout=10)
+            return conn
+        except Exception as e:
+            st.error(f"❌ Erro ao conectar ao banco de dados PostgreSQL remoto: {e}")
+            st.stop()
     else:
         conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
         conn.row_factory = sqlite3.Row
