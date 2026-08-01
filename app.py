@@ -1,7 +1,6 @@
 import streamlit as st
 import sqlite3
 import psycopg2
-from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import pandas as pd
 from datetime import datetime, timedelta
@@ -35,32 +34,20 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS E POOL DE CONEXÕES ALTA PERFORMANCE
+# 1. BANCO DE DADOS (Execução Direta e Rápida)
 # -----------------------------------------------------------------------------
 def is_postgres():
     return "postgres" in st.secrets
 
-@st.cache_resource
-def init_connection_pool():
-    if not is_postgres():
-        return None
-    
-    pg = st.secrets["postgres"]
-    try:
+def get_db_connection():
+    if is_postgres():
+        pg = st.secrets["postgres"]
         if "url" in pg and pg["url"]:
-            return pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,
-                dsn=pg["url"],
-                cursor_factory=RealDictCursor,
-                connect_timeout=5
-            )
+            return psycopg2.connect(pg["url"], cursor_factory=RealDictCursor, connect_timeout=5)
         else:
-            return pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,
+            return psycopg2.connect(
                 host=pg["host"],
-                port=str(pg.get("port", "6543")),
+                port=str(pg.get("port", "5432")),  # Tenta porta 5432 direta se 6543 estiver lenta
                 dbname=pg.get("dbname", "postgres"),
                 user=pg["user"],
                 password=pg["password"],
@@ -68,51 +55,18 @@ def init_connection_pool():
                 cursor_factory=RealDictCursor,
                 connect_timeout=5
             )
-    except Exception as e:
-        st.error(f"❌ **Erro de conexão ao PostgreSQL Supabase:** {e}")
-        st.stop()
+    else:
+        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False):
     use_pg = is_postgres()
     formatted_query = query.replace('?', '%s') if use_pg else query
 
-    if use_pg:
-        connection_pool = init_connection_pool()
-        conn = connection_pool.getconn()
-        try:
-            # Garante que a conexão pega do pool não caiu por inatividade
-            if conn.closed != 0:
-                connection_pool.putconn(conn, close=True)
-                conn = connection_pool.getconn()
-
-            with conn.cursor() as cursor:
-                cursor.execute(formatted_query, params)
-                
-                result = None
-                if fetchone:
-                    row = cursor.fetchone()
-                    result = dict(row) if row else None
-                elif fetchall:
-                    rows = cursor.fetchall()
-                    result = [dict(r) for r in rows]
-                    
-                if commit:
-                    conn.commit()
-                    
-                return result
-        except Exception as e:
-            if commit:
-                conn.rollback()
-            raise e
-        finally:
-            # Devolve a conexão ao Pool em vez de destruí-la
-            connection_pool.putconn(conn)
-    else:
-        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        try:
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
             cursor.execute(formatted_query, params)
             result = None
             if fetchone:
@@ -124,11 +78,13 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False
                 
             if commit:
                 conn.commit()
-                
             return result
-        finally:
-            cursor.close()
-            conn.close()
+    except Exception as e:
+        if commit:
+            conn.rollback()
+        raise e
+    finally:
+        conn.close()
 
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
@@ -137,7 +93,6 @@ def init_db():
     use_pg = is_postgres()
     serial_pk = "SERIAL PRIMARY KEY" if use_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
-    # 1. Configurações da Empresa
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS config_empresa (
             id INTEGER PRIMARY KEY,
@@ -154,9 +109,7 @@ def init_db():
     """, commit=True)
     
     res_count = execute_query("SELECT COUNT(*) as count FROM config_empresa", fetchone=True)
-    count_val = res_count['count'] if res_count else 0
-    
-    if count_val == 0:
+    if not res_count or res_count['count'] == 0:
         execute_query("""
             INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
             VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
@@ -164,7 +117,6 @@ def init_db():
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, ?)
         """, (hash_senha("laurenti2026"),), commit=True)
 
-    # 2. Status Comercial
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS status_comercial (
             id {serial_pk},
@@ -173,16 +125,13 @@ def init_db():
     """, commit=True)
     
     res_count = execute_query("SELECT COUNT(*) as count FROM status_comercial", fetchone=True)
-    count_val = res_count['count'] if res_count else 0
-    
-    if count_val == 0:
+    if not res_count or res_count['count'] == 0:
         for st_name in ["Em Análise", "Aprovado", "Em Produção", "Perdido"]:
             try:
                 execute_query("INSERT INTO status_comercial (nome) VALUES (?)", (st_name,), commit=True)
             except Exception:
                 pass
 
-    # 3. Consultores
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS consultores (
             id {serial_pk},
@@ -191,13 +140,10 @@ def init_db():
     """, commit=True)
     
     res_count = execute_query("SELECT COUNT(*) as count FROM consultores", fetchone=True)
-    count_val = res_count['count'] if res_count else 0
-    
-    if count_val == 0:
+    if not res_count or res_count['count'] == 0:
         for cons_name in ["KATIA LUCIA LOURENCO", "Sem Consultor"]:
             execute_query("INSERT INTO consultores (nome) VALUES (?)", (cons_name,), commit=True)
 
-    # 4. Orçamentos
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS orcamentos (
             id {serial_pk},
@@ -220,7 +166,6 @@ def init_db():
         )
     """, commit=True)
 
-    # 5. Ambientes
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS ambientes (
             id {serial_pk},
@@ -233,7 +178,6 @@ def init_db():
         )
     """, commit=True)
 
-    # 6. Itens / Subitens
     execute_query(f"""
         CREATE TABLE IF NOT EXISTS itens (
             id {serial_pk},
@@ -248,7 +192,8 @@ def init_db():
 
 init_db()
 
-# Funções Auxiliares de Banco de Dados
+# CACHEAR CONSULTAS ESTÁTICAS PARA EVITAR LATÊNCIA
+@st.cache_data(ttl=600)
 def get_config():
     row = execute_query("SELECT * FROM config_empresa WHERE id = 1", fetchone=True)
     if row:
@@ -264,12 +209,14 @@ def get_config():
         return row
     return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0, 'senha_hash': hash_senha("laurenti2026")}
 
+@st.cache_data(ttl=300)
 def get_status_list():
     rows = execute_query("SELECT nome FROM status_comercial ORDER BY id ASC", fetchall=True)
     if rows:
         return [r['nome'] for r in rows]
     return ["Em Análise"]
 
+@st.cache_data(ttl=300)
 def get_consultores():
     rows = execute_query("SELECT id, nome FROM consultores ORDER BY nome ASC", fetchall=True)
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['id', 'nome'])
@@ -278,8 +225,7 @@ def get_proxima_proposta():
     row = execute_query("SELECT proposta_num FROM orcamentos ORDER BY id DESC LIMIT 1", fetchone=True)
     if row and row['proposta_num'] is not None:
         try:
-            val = int(row['proposta_num'])
-            return val + 1
+            return int(row['proposta_num']) + 1
         except ValueError:
             return 1
     return 1
@@ -1218,6 +1164,7 @@ if menu == "➕ Novo / Editar Orçamento":
                     for idx_i, item in enumerate(amb['itens']):
                         execute_query("INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (?, ?, ?, ?, ?)", (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0), commit=True)
                 
+                st.cache_data.clear()  # Limpa o cache para que novos orçamentos apareçam na lista
                 st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados!")
 
     with col_btn2:
@@ -1433,6 +1380,7 @@ elif menu == "📋 Orçamentos Salvos":
                     c_del1, c_del2 = st.columns(2)
                     if c_del1.button("✅ Confirmar", key=f"conf_del_orc_{row['id']}"):
                         execute_query("DELETE FROM orcamentos WHERE id = ?", (row['id'],), commit=True)
+                        st.cache_data.clear()
                         st.session_state.confirm_del = None
                         st.rerun()
                     if c_del2.button("❌ Cancelar", key=f"canc_del_orc_{row['id']}"):
@@ -1456,6 +1404,7 @@ elif menu == "⚙️ Configurações":
         with open(logo_path, "wb") as f:
             f.write(uploaded_logo.getbuffer())
         execute_query("UPDATE config_empresa SET logo_path = ? WHERE id = 1", (logo_path,), commit=True)
+        st.cache_data.clear()
         st.success("Logo atualizada com sucesso!")
 
     logo_actual = config.get('logo_path', '')
@@ -1479,6 +1428,7 @@ elif menu == "⚙️ Configurações":
                 WHERE id = 1
             """
             execute_query(q_up_cfg, (nome_empresa, cnpj, ie, endereco, telefone, email, logo_largura), commit=True)
+            st.cache_data.clear()
             st.success("Dados da empresa salvos!")
             st.rerun()
 
@@ -1499,6 +1449,7 @@ elif menu == "⚙️ Configurações":
                 st.error("As senhas digitadas não coincidem.")
             else:
                 execute_query("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha(nova_senha),), commit=True)
+                st.cache_data.clear()
                 st.success("Senha do sistema alterada com sucesso!")
 
     st.markdown("---")
@@ -1513,6 +1464,7 @@ elif menu == "⚙️ Configurações":
                 if novo_st:
                     try:
                         execute_query("INSERT INTO status_comercial (nome) VALUES (?)", (novo_st.strip(),), commit=True)
+                        st.cache_data.clear()
                         st.success(f"Status '{novo_st}' cadastrado!")
                         st.rerun()
                     except Exception:
@@ -1533,6 +1485,7 @@ elif menu == "⚙️ Configurações":
                 
                 if c_del1.button("✅ Confirmar", key=f"conf_del_status_{st_item}"):
                     execute_query("DELETE FROM status_comercial WHERE nome = ?", (st_item,), commit=True)
+                    st.cache_data.clear()
                     
                     status_restantes = get_status_list()
                     fallback_status = status_restantes[0] if status_restantes else "Em Análise"
@@ -1556,6 +1509,7 @@ elif menu == "⚙️ Configurações":
             if st.form_submit_button("➕ Cadastrar Consultor"):
                 if novo_c:
                     execute_query("INSERT INTO consultores (nome) VALUES (?)", (novo_c.strip(),), commit=True)
+                    st.cache_data.clear()
                     st.rerun()
 
         df_c = get_consultores()
@@ -1572,6 +1526,7 @@ elif menu == "⚙️ Configurações":
                     c_del1, c_del2 = st.columns(2)
                     if c_del1.button("✅ Confirmar", key=f"conf_del_cons_{r['id']}"):
                         execute_query("DELETE FROM consultores WHERE id = ?", (r['id'],), commit=True)
+                        st.cache_data.clear()
                         st.session_state.confirm_del = None
                         st.rerun()
                     if c_del2.button("❌ Cancelar", key=f"canc_del_cons_{r['id']}"):
