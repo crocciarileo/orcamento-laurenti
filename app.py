@@ -46,10 +46,11 @@ def get_connection():
         if "host" in pg_secrets:
             conn = psycopg2.connect(
                 host=pg_secrets["host"],
-                port=pg_secrets.get("port", "5432"),
+                port=pg_secrets.get("port", "6543"),
                 dbname=pg_secrets.get("dbname", "postgres"),
                 user=pg_secrets.get("user", "postgres"),
                 password=pg_secrets["password"],
+                sslmode=pg_secrets.get("sslmode", "require"),
                 cursor_factory=RealDictCursor
             )
         else:
