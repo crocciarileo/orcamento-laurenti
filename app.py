@@ -38,11 +38,22 @@ st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝"
 # 1. BANCO DE DADOS E MIGRAÇÕES (PostgreSQL / SQLite Híbrido)
 # -----------------------------------------------------------------------------
 def is_postgres():
-    return "postgres" in st.secrets and "url" in st.secrets["postgres"]
+    return "postgres" in st.secrets
 
 def get_connection():
     if is_postgres():
-        conn = psycopg2.connect(st.secrets["postgres"]["url"], cursor_factory=RealDictCursor)
+        pg_secrets = st.secrets["postgres"]
+        if "host" in pg_secrets:
+            conn = psycopg2.connect(
+                host=pg_secrets["host"],
+                port=pg_secrets.get("port", "5432"),
+                dbname=pg_secrets.get("dbname", "postgres"),
+                user=pg_secrets.get("user", "postgres"),
+                password=pg_secrets["password"],
+                cursor_factory=RealDictCursor
+            )
+        else:
+            conn = psycopg2.connect(pg_secrets["url"], cursor_factory=RealDictCursor)
         return conn
     else:
         conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
@@ -53,7 +64,6 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False
     conn = get_connection()
     use_pg = is_postgres()
     
-    # Ajusta os marcadores de posição no SQL (? para SQLite, %s para PostgreSQL)
     if use_pg:
         formatted_query = query.replace('?', '%s')
     else:
@@ -85,7 +95,6 @@ def init_db():
     c = conn.cursor()
     use_pg = is_postgres()
     
-    # Sintaxe adaptada para auto-incremento em Postgres vs SQLite
     serial_pk = "SERIAL PRIMARY KEY" if use_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     
     # 1. Configurações da Empresa
