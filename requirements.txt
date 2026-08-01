@@ -1,6 +1,7 @@
 streamlit
 pandas
-reportlab
-python-docx
 openpyxl
+python-docx
+reportlab
 Pillow
+psycopg2-binary

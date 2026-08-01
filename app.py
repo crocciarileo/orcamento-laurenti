@@ -1,5 +1,7 @@
 import streamlit as st
 import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import pandas as pd
 from datetime import datetime, timedelta
 import io
@@ -33,12 +35,47 @@ from reportlab.pdfgen import canvas
 st.set_page_config(page_title="Orçamentos - Laurenti Móveis", page_icon="📝", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 1. BANCO DE DADOS E MIGRAÇÕES (SQLite)
+# 1. BANCO DE DADOS E MIGRAÇÕES (PostgreSQL / SQLite Híbrido)
 # -----------------------------------------------------------------------------
+def is_postgres():
+    return "postgres" in st.secrets and "url" in st.secrets["postgres"]
+
 def get_connection():
-    conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if is_postgres():
+        conn = psycopg2.connect(st.secrets["postgres"]["url"], cursor_factory=RealDictCursor)
+        return conn
+    else:
+        conn = sqlite3.connect('orcamentos.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def execute_query(query, params=(), fetchone=False, fetchall=False, commit=False):
+    conn = get_connection()
+    use_pg = is_postgres()
+    
+    # Ajusta os marcadores de posição no SQL (? para SQLite, %s para PostgreSQL)
+    if use_pg:
+        formatted_query = query.replace('?', '%s')
+    else:
+        formatted_query = query
+
+    cursor = conn.cursor()
+    cursor.execute(formatted_query, params)
+    
+    result = None
+    if fetchone:
+        row = cursor.fetchone()
+        result = dict(row) if row else None
+    elif fetchall:
+        rows = cursor.fetchall()
+        result = [dict(r) for r in rows]
+        
+    if commit:
+        conn.commit()
+        
+    cursor.close()
+    conn.close()
+    return result
 
 def hash_senha(senha_raw):
     return hashlib.sha256(senha_raw.encode('utf-8')).hexdigest()
@@ -46,9 +83,13 @@ def hash_senha(senha_raw):
 def init_db():
     conn = get_connection()
     c = conn.cursor()
+    use_pg = is_postgres()
     
-    # Configurações da Empresa
-    c.execute("""
+    # Sintaxe adaptada para auto-incremento em Postgres vs SQLite
+    serial_pk = "SERIAL PRIMARY KEY" if use_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    
+    # 1. Configurações da Empresa
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS config_empresa (
             id INTEGER PRIMARY KEY,
             nome_empresa TEXT,
@@ -63,53 +104,63 @@ def init_db():
         )
     """)
     
-    c.execute("SELECT COUNT(*) FROM config_empresa")
-    if c.fetchone()[0] == 0:
+    c.execute("SELECT COUNT(*) as count FROM config_empresa")
+    res_count = c.fetchone()
+    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    
+    if count_val == 0:
         c.execute("""
+            INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
+            VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
+                    'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
+                    '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, %s)
+        """ if use_pg else """
             INSERT INTO config_empresa (id, nome_empresa, cnpj, ie, endereco, telefone, email, logo_path, logo_largura, senha_hash)
             VALUES (1, 'Fábrica de Móveis Laurenti Ltda', '44.331.015/0001-08', '186000158114', 
                     'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP', 
                     '(17) 3576-1464', 'contato@laurentimoveis.com.br', '', 5.0, ?)
         """, (hash_senha("laurenti2026"),))
 
-    # Migração logo_largura e senha_hash
-    c.execute("PRAGMA table_info(config_empresa)")
-    colunas_config = [col[1] for col in c.fetchall()]
-    if 'logo_largura' not in colunas_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN logo_largura REAL DEFAULT 5.0")
-    if 'senha_hash' not in colunas_config:
-        c.execute("ALTER TABLE config_empresa ADD COLUMN senha_hash TEXT")
-        c.execute("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha("laurenti2026"),))
-
-    # Status Comercial Dinâmico
-    c.execute("""
+    # 2. Status Comercial
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS status_comercial (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {serial_pk},
             nome TEXT UNIQUE NOT NULL
         )
     """)
     
-    c.execute("SELECT COUNT(*) FROM status_comercial")
-    if c.fetchone()[0] == 0:
-        status_iniciais = [("Em Análise",), ("Aprovado",), ("Em Produção",), ("Perdido",)]
-        c.executemany("INSERT INTO status_comercial (nome) VALUES (?)", status_iniciais)
+    c.execute("SELECT COUNT(*) as count FROM status_comercial")
+    res_count = c.fetchone()
+    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    
+    if count_val == 0:
+        status_iniciais = ["Em Análise", "Aprovado", "Em Produção", "Perdido"]
+        for st_name in status_iniciais:
+            try:
+                c.execute("INSERT INTO status_comercial (nome) VALUES (%s)" if use_pg else "INSERT INTO status_comercial (nome) VALUES (?)", (st_name,))
+            except Exception:
+                pass
 
-    # Consultores
-    c.execute("""
+    # 3. Consultores
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS consultores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {serial_pk},
             nome TEXT NOT NULL
         )
     """)
     
-    c.execute("SELECT COUNT(*) FROM consultores")
-    if c.fetchone()[0] == 0:
-        c.executemany("INSERT INTO consultores (nome) VALUES (?)", [("KATIA LUCIA LOURENCO",), ("Sem Consultor",)])
+    c.execute("SELECT COUNT(*) as count FROM consultores")
+    res_count = c.fetchone()
+    count_val = res_count['count'] if isinstance(res_count, dict) else res_count[0]
+    
+    if count_val == 0:
+        for cons_name in ["KATIA LUCIA LOURENCO", "Sem Consultor"]:
+            c.execute("INSERT INTO consultores (nome) VALUES (%s)" if use_pg else "INSERT INTO consultores (nome) VALUES (?)", (cons_name,))
 
-    # Orçamentos
-    c.execute("""
+    # 4. Orçamentos
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS orcamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {serial_pk},
             proposta_num INTEGER,
             cliente TEXT NOT NULL,
             contato TEXT,
@@ -128,16 +179,11 @@ def init_db():
             status TEXT DEFAULT 'Em Análise'
         )
     """)
-    
-    c.execute("PRAGMA table_info(orcamentos)")
-    colunas_orc = [col[1] for col in c.fetchall()]
-    if 'status' not in colunas_orc:
-        c.execute("ALTER TABLE orcamentos ADD COLUMN status TEXT DEFAULT 'Em Análise'")
 
-    # Ambientes
-    c.execute("""
+    # 5. Ambientes
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS ambientes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {serial_pk},
             orcamento_id INTEGER,
             ordem INTEGER,
             nome_ambiente TEXT NOT NULL,
@@ -147,10 +193,10 @@ def init_db():
         )
     """)
 
-    # Itens / Subitens
-    c.execute("""
+    # 6. Itens / Subitens
+    c.execute(f"""
         CREATE TABLE IF NOT EXISTS itens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {serial_pk},
             ambiente_id INTEGER,
             ordem INTEGER,
             descricao TEXT NOT NULL,
@@ -161,45 +207,39 @@ def init_db():
     """)
     
     conn.commit()
+    c.close()
+    conn.close()
 
 init_db()
 
-# Funções Auxiliares protegidas
+# Funções Auxiliares de Banco de Dados
 def get_config():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM config_empresa WHERE id = 1")
-    row = c.fetchone()
+    row = execute_query("SELECT * FROM config_empresa WHERE id = 1", fetchone=True)
     if row:
-        d = dict(row)
-        d.setdefault('nome_empresa', 'Fábrica de Móveis Laurenti Ltda')
-        d.setdefault('cnpj', '44.331.015/0001-08')
-        d.setdefault('ie', '186000158114')
-        d.setdefault('endereco', 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP')
-        d.setdefault('telefone', '(17) 3576-1464')
-        d.setdefault('email', 'contato@laurentimoveis.com.br')
-        d.setdefault('logo_path', '')
-        d.setdefault('logo_largura', 5.0)
-        d.setdefault('senha_hash', hash_senha("laurenti2026"))
-        return d
+        row.setdefault('nome_empresa', 'Fábrica de Móveis Laurenti Ltda')
+        row.setdefault('cnpj', '44.331.015/0001-08')
+        row.setdefault('ie', '186000158114')
+        row.setdefault('endereco', 'Rua Henrique Villa, 59- Jardim Maria Emília. CEP: 15960000, ARIRANHA-SP')
+        row.setdefault('telefone', '(17) 3576-1464')
+        row.setdefault('email', 'contato@laurentimoveis.com.br')
+        row.setdefault('logo_path', '')
+        row.setdefault('logo_largura', 5.0)
+        row.setdefault('senha_hash', hash_senha("laurenti2026"))
+        return row
     return {'nome_empresa': 'Fábrica de Móveis Laurenti Ltda', 'cnpj': '44.331.015/0001-08', 'ie': '186000158114', 'endereco': '', 'telefone': '', 'email': '', 'logo_path': '', 'logo_largura': 5.0, 'senha_hash': hash_senha("laurenti2026")}
 
 def get_status_list():
-    conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM status_comercial ORDER BY id ASC", conn)
-    if not df.empty:
-        return df['nome'].tolist()
+    rows = execute_query("SELECT nome FROM status_comercial ORDER BY id ASC", fetchall=True)
+    if rows:
+        return [r['nome'] for r in rows]
     return ["Em Análise"]
 
 def get_consultores():
-    conn = get_connection()
-    return pd.read_sql_query("SELECT * FROM consultores ORDER BY nome ASC", conn)
+    rows = execute_query("SELECT id, nome FROM consultores ORDER BY nome ASC", fetchall=True)
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['id', 'nome'])
 
 def get_proxima_proposta():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT proposta_num FROM orcamentos ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
+    row = execute_query("SELECT proposta_num FROM orcamentos ORDER BY id DESC LIMIT 1", fetchone=True)
     if row and row['proposta_num'] is not None:
         try:
             val = int(row['proposta_num'])
@@ -209,10 +249,7 @@ def get_proxima_proposta():
     return 1
 
 def get_ultimas_condicoes():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes, status FROM orcamentos ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
+    row = execute_query("SELECT consultor, prazo_entrega, condicoes_pagamento, observacoes, status FROM orcamentos ORDER BY id DESC LIMIT 1", fetchone=True)
     status_disponiveis = get_status_list()
     default_status = status_disponiveis[0] if status_disponiveis else "Em Análise"
     
@@ -1093,40 +1130,61 @@ if menu == "➕ Novo / Editar Orçamento":
             elif not st.session_state.ambientes:
                 st.error("Adicione pelo menos um ambiente antes de salvar.")
             else:
+                num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
+                
+                use_pg = is_postgres()
                 conn = get_connection()
                 c = conn.cursor()
-                
-                num_para_salvar = int(prop_num_atual) if str(prop_num_atual).isdigit() else get_proxima_proposta()
 
                 if st.session_state.edit_index:
                     orc_id = st.session_state.edit_index
-                    c.execute("DELETE FROM ambientes WHERE orcamento_id = ?", (orc_id,))
-                    c.execute("""
+                    execute_query("DELETE FROM ambientes WHERE orcamento_id = ?", (orc_id,), commit=True)
+                    
+                    q_up = """
                         UPDATE orcamentos SET proposta_num=?, cliente=?, contato=?, tipo_contato=?, telefone=?, email=?, consultor=?, data=?, dias_validade=?, validade=?, prazo_entrega=?, condicoes_pagamento=?, observacoes=?, total_liquido=?, total_com_opcionais=?, status=?
                         WHERE id=?
-                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento, orc_id))
+                    """
+                    execute_query(q_up, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento, orc_id), commit=True)
                 else:
-                    c.execute("""
-                        INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
-                    orc_id = c.lastrowid
+                    if use_pg:
+                        c.execute("""
+                            INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                        """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
+                        orc_id = c.fetchone()['id']
+                        conn.commit()
+                    else:
+                        c.execute("""
+                            INSERT INTO orcamentos (proposta_num, cliente, contato, tipo_contato, telefone, email, consultor, data, dias_validade, validade, prazo_entrega, condicoes_pagamento, observacoes, total_liquido, total_com_opcionais, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (num_para_salvar, cliente, contato, tipo_contato, telefone, email, consultor, str(data_atual), dias_validade, str(data_validade.strftime('%d/%m/%Y')), prazo_entrega, condicoes_pagamento, observacoes, tot_liquido, tot_com_opcionais, status_orcamento))
+                        orc_id = c.lastrowid
+                        conn.commit()
                 
                 for idx_a, amb in enumerate(st.session_state.ambientes):
-                    c.execute("""
-                        INSERT INTO ambientes (orcamento_id, ordem, nome_ambiente, especificacoes, total_ambiente)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']))
-                    
-                    amb_id = c.lastrowid
-                    for idx_i, item in enumerate(amb['itens']):
+                    if use_pg:
                         c.execute("""
-                            INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional)
+                            INSERT INTO ambientes (orcamento_id, ordem, nome_ambiente, especificacoes, total_ambiente)
+                            VALUES (%s, %s, %s, %s, %s) RETURNING id
+                        """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']))
+                        amb_id = c.fetchone()['id']
+                        conn.commit()
+                    else:
+                        c.execute("""
+                            INSERT INTO ambientes (orcamento_id, ordem, nome_ambiente, especificacoes, total_ambiente)
                             VALUES (?, ?, ?, ?, ?)
-                        """, (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0))
+                        """, (orc_id, idx_a + 1, amb['nome'], amb['especificacoes'], amb['total_ambiente']))
+                        amb_id = c.lastrowid
+                        conn.commit()
+                    
+                    for idx_i, item in enumerate(amb['itens']):
+                        q_it = "INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (%s, %s, %s, %s, %s)" if use_pg else "INSERT INTO itens (ambiente_id, ordem, descricao, valor, eh_opcional) VALUES (?, ?, ?, ?, ?)"
+                        c.execute(q_it, (amb_id, idx_i + 1, item['descricao'], item['valor'], 1 if item['eh_opcional'] else 0))
+                        conn.commit()
                 
-                conn.commit()
-                st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso!")
+                c.close()
+                conn.close()
+                st.success(f"✅ Orçamento Proposta Nº {prop_formatted} salvo com sucesso no banco de dados remoto!")
 
     with col_btn2:
         cli_info = {
@@ -1177,8 +1235,6 @@ if menu == "➕ Novo / Editar Orçamento":
 # --- ABA 2: ORÇAMENTOS SALVOS ---
 elif menu == "📋 Orçamentos Salvos":
     st.subheader("📋 Orçamentos Salvos no Banco de Dados")
-    conn = get_connection()
-    c = conn.cursor()
     
     status_list = get_status_list()
     
@@ -1202,7 +1258,8 @@ elif menu == "📋 Orçamentos Salvos":
 
     query += " ORDER BY id DESC"
     
-    df_orc = pd.read_sql_query(query, conn, params=params)
+    rows = execute_query(query, params=params, fetchall=True)
+    df_orc = pd.DataFrame(rows) if rows else pd.DataFrame()
     
     if not df_orc.empty:
         for idx, row in df_orc.iterrows():
@@ -1217,8 +1274,7 @@ elif menu == "📋 Orçamentos Salvos":
                 col_a3.write(f"R$ {row['total_liquido']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                 
                 if col_a4.button("✏️ Editar", key=f"btn_edit_orc_{row['id']}"):
-                    c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                    o = dict(c.fetchone())
+                    o = execute_query("SELECT * FROM orcamentos WHERE id = ?", (row['id'],), fetchone=True)
                     
                     st.session_state.edit_index = o['id']
                     st.session_state.cli_prop = o['proposta_num']
@@ -1237,13 +1293,11 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.form_version += 1
                     
                     ambs_db = []
-                    c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
-                    for amb_row in c.fetchall():
-                        amb_dict = dict(amb_row)
+                    amb_rows = execute_query("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],), fetchall=True)
+                    for amb_dict in amb_rows:
                         itens_db = []
-                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
-                        for item_row in c.fetchall():
-                            item_dict = dict(item_row)
+                        item_rows = execute_query("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],), fetchall=True)
+                        for item_dict in item_rows:
                             itens_db.append({
                                 'id': str(uuid.uuid4()),
                                 'descricao': item_dict['descricao'],
@@ -1261,8 +1315,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.rerun()
 
                 if col_a5.button("📋 Clonar", key=f"btn_clone_orc_{row['id']}"):
-                    c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                    o = dict(c.fetchone())
+                    o = execute_query("SELECT * FROM orcamentos WHERE id = ?", (row['id'],), fetchone=True)
                     
                     st.session_state.edit_index = None
                     st.session_state.cli_prop = get_proxima_proposta()
@@ -1281,13 +1334,11 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.form_version += 1
                     
                     ambs_db = []
-                    c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
-                    for amb_row in c.fetchall():
-                        amb_dict = dict(amb_row)
+                    amb_rows = execute_query("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],), fetchall=True)
+                    for amb_dict in amb_rows:
                         itens_db = []
-                        c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
-                        for item_row in c.fetchall():
-                            item_dict = dict(item_row)
+                        item_rows = execute_query("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],), fetchall=True)
+                        for item_dict in item_rows:
                             itens_db.append({
                                 'id': str(uuid.uuid4()),
                                 'descricao': item_dict['descricao'],
@@ -1304,16 +1355,13 @@ elif menu == "📋 Orçamentos Salvos":
                     st.session_state.change_tab_to = "➕ Novo / Editar Orçamento"
                     st.rerun()
 
-                c.execute("SELECT * FROM orcamentos WHERE id = ?", (row['id'],))
-                o_saved = dict(c.fetchone())
+                o_saved = execute_query("SELECT * FROM orcamentos WHERE id = ?", (row['id'],), fetchone=True)
                 ambs_saved = []
-                c.execute("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],))
-                for amb_row in c.fetchall():
-                    amb_dict = dict(amb_row)
+                amb_rows = execute_query("SELECT id, nome_ambiente, especificacoes, total_ambiente FROM ambientes WHERE orcamento_id = ? ORDER BY ordem", (row['id'],), fetchall=True)
+                for amb_dict in amb_rows:
                     itens_saved = []
-                    c.execute("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],))
-                    for item_row in c.fetchall():
-                        item_dict = dict(item_row)
+                    item_rows = execute_query("SELECT descricao, valor, eh_opcional FROM itens WHERE ambiente_id = ? ORDER BY ordem", (amb_dict['id'],), fetchall=True)
+                    for item_dict in item_rows:
                         itens_saved.append({'descricao': item_dict['descricao'], 'valor': item_dict['valor'], 'eh_opcional': bool(item_dict['eh_opcional'])})
                     ambs_saved.append({'nome': amb_dict['nome_ambiente'], 'especificacoes': amb_dict['especificacoes'] or "", 'total_ambiente': amb_dict['total_ambiente'], 'itens': itens_saved})
 
@@ -1350,8 +1398,7 @@ elif menu == "📋 Orçamentos Salvos":
                     st.warning(f"⚠️ Confirma a exclusão permanente do Orçamento Proposta #{p_fmt}?")
                     c_del1, c_del2 = st.columns(2)
                     if c_del1.button("✅ Confirmar", key=f"conf_del_orc_{row['id']}"):
-                        c.execute("DELETE FROM orcamentos WHERE id = ?", (row['id'],))
-                        conn.commit()
+                        execute_query("DELETE FROM orcamentos WHERE id = ?", (row['id'],), commit=True)
                         st.session_state.confirm_del = None
                         st.rerun()
                     if c_del2.button("❌ Cancelar", key=f"canc_del_orc_{row['id']}"):
@@ -1365,8 +1412,6 @@ elif menu == "📋 Orçamentos Salvos":
 # --- ABA 3: CONFIGURAÇÕES E LOGO ---
 elif menu == "⚙️ Configurações":
     st.subheader("⚙️ Configurações da Empresa, Consultores, Status e Segurança")
-    conn = get_connection()
-    c = conn.cursor()
     
     st.markdown("#### 🏢 Logo e Dados da Fábrica")
     config = get_config()
@@ -1376,8 +1421,7 @@ elif menu == "⚙️ Configurações":
         logo_path = os.path.join("logo_empresa.png")
         with open(logo_path, "wb") as f:
             f.write(uploaded_logo.getbuffer())
-        c.execute("UPDATE config_empresa SET logo_path = ? WHERE id = 1", (logo_path,))
-        conn.commit()
+        execute_query("UPDATE config_empresa SET logo_path = ? WHERE id = 1", (logo_path,), commit=True)
         st.success("Logo atualizada com sucesso!")
 
     logo_actual = config.get('logo_path', '')
@@ -1395,12 +1439,12 @@ elif menu == "⚙️ Configurações":
         logo_largura = st.slider("Largura da Logo no PDF (cm)", min_value=3.0, max_value=8.0, value=float(config.get('logo_largura', 5.0)), step=0.5)
         
         if st.form_submit_button("💾 Salvar Dados da Empresa"):
-            c.execute("""
+            q_up_cfg = """
                 UPDATE config_empresa
                 SET nome_empresa = ?, cnpj = ?, ie = ?, endereco = ?, telefone = ?, email = ?, logo_largura = ?
                 WHERE id = 1
-            """, (nome_empresa, cnpj, ie, endereco, telefone, email, logo_largura))
-            conn.commit()
+            """
+            execute_query(q_up_cfg, (nome_empresa, cnpj, ie, endereco, telefone, email, logo_largura), commit=True)
             st.success("Dados da empresa salvos!")
             st.rerun()
 
@@ -1420,8 +1464,7 @@ elif menu == "⚙️ Configurações":
             elif nova_senha != confirma_senha:
                 st.error("As senhas digitadas não coincidem.")
             else:
-                c.execute("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha(nova_senha),))
-                conn.commit()
+                execute_query("UPDATE config_empresa SET senha_hash = ? WHERE id = 1", (hash_senha(nova_senha),), commit=True)
                 st.success("Senha do sistema alterada com sucesso!")
 
     st.markdown("---")
@@ -1435,11 +1478,10 @@ elif menu == "⚙️ Configurações":
             if st.form_submit_button("➕ Cadastrar Status"):
                 if novo_st:
                     try:
-                        c.execute("INSERT INTO status_comercial (nome) VALUES (?)", (novo_st.strip(),))
-                        conn.commit()
+                        execute_query("INSERT INTO status_comercial (nome) VALUES (?)", (novo_st.strip(),), commit=True)
                         st.success(f"Status '{novo_st}' cadastrado!")
                         st.rerun()
-                    except sqlite3.IntegrityError:
+                    except Exception:
                         st.error("Este status já está cadastrado.")
 
         status_atuais = get_status_list()
@@ -1456,19 +1498,15 @@ elif menu == "⚙️ Configurações":
                 c_del1, c_del2 = st.columns(2)
                 
                 if c_del1.button("✅ Confirmar", key=f"conf_del_status_{st_item}"):
-                    c.execute("DELETE FROM status_comercial WHERE nome = ?", (st_item,))
-                    conn.commit()
+                    execute_query("DELETE FROM status_comercial WHERE nome = ?", (st_item,), commit=True)
                     
                     status_restantes = get_status_list()
                     fallback_status = status_restantes[0] if status_restantes else "Em Análise"
                     if not status_restantes:
-                        c.execute("INSERT INTO status_comercial (nome) VALUES (?)", ("Em Análise",))
-                        conn.commit()
+                        execute_query("INSERT INTO status_comercial (nome) VALUES (?)", ("Em Análise",), commit=True)
                         fallback_status = "Em Análise"
                     
-                    c.execute("UPDATE orcamentos SET status = ? WHERE status = ?", (fallback_status, st_item))
-                    conn.commit()
-                    
+                    execute_query("UPDATE orcamentos SET status = ? WHERE status = ?", (fallback_status, st_item), commit=True)
                     st.session_state.confirm_del = None
                     st.rerun()
                     
@@ -1483,8 +1521,7 @@ elif menu == "⚙️ Configurações":
             novo_c = st.text_input("Nome do Novo Consultor")
             if st.form_submit_button("➕ Cadastrar Consultor"):
                 if novo_c:
-                    c.execute("INSERT INTO consultores (nome) VALUES (?)", (novo_c.strip(),))
-                    conn.commit()
+                    execute_query("INSERT INTO consultores (nome) VALUES (?)", (novo_c.strip(),), commit=True)
                     st.rerun()
 
         df_c = get_consultores()
@@ -1500,8 +1537,7 @@ elif menu == "⚙️ Configurações":
                     st.warning(f"⚠️ Remover o consultor '{r['nome']}'?")
                     c_del1, c_del2 = st.columns(2)
                     if c_del1.button("✅ Confirmar", key=f"conf_del_cons_{r['id']}"):
-                        c.execute("DELETE FROM consultores WHERE id = ?", (r['id'],))
-                        conn.commit()
+                        execute_query("DELETE FROM consultores WHERE id = ?", (r['id'],), commit=True)
                         st.session_state.confirm_del = None
                         st.rerun()
                     if c_del2.button("❌ Cancelar", key=f"canc_del_cons_{r['id']}"):
